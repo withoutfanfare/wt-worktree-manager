@@ -1,0 +1,141 @@
+#compdef wt
+
+# Zsh completion for wt (Git worktree manager for Laravel Herd)
+# Place this file in your fpath (e.g., ~/.zsh/completions/_wt)
+# Or source it directly: source /path/to/_wt
+
+_wt_repos() {
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local repos=()
+  for dir in "$herd_root"/*.git(N); do
+    [[ -d "$dir" ]] && repos+=("${${dir:t}%.git}")
+  done
+  _describe 'repository' repos
+}
+
+_wt_branches() {
+  local repo="$1"
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local git_dir="$herd_root/${repo}.git"
+
+  [[ -d "$git_dir" ]] || return 1
+
+  local branches=()
+  local line
+  while IFS= read -r line; do
+    branches+=("$line")
+  done < <(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null | \
+    grep '^branch refs/heads/' | sed 's|^branch refs/heads/||')
+
+  _describe 'branch' branches
+}
+
+_wt_all_branches() {
+  local repo="$1"
+  local herd_root="${HERD_ROOT:-$HOME/Herd}"
+  local git_dir="$herd_root/${repo}.git"
+
+  [[ -d "$git_dir" ]] || return 1
+
+  local branches=()
+  local line
+  # Get all remote branches
+  while IFS= read -r line; do
+    # Strip origin/ prefix for cleaner display
+    branches+=("${line#origin/}")
+  done < <(git --git-dir="$git_dir" branch -r 2>/dev/null | sed 's/^[[:space:]]*//' | grep -v HEAD)
+
+  _describe 'branch' branches
+}
+
+_wt() {
+  local curcontext="$curcontext" state line
+  typeset -A opt_args
+
+  local -a commands
+  commands=(
+    'add:Create a new worktree'
+    'rm:Remove a worktree'
+    'ls:List worktrees for a repository'
+    'repos:List all repositories'
+    'clone:Clone a repository as bare repo'
+    'status:Show status of all worktrees'
+    'pull:Pull latest changes'
+    'pull-all:Pull all worktrees in parallel'
+    'sync:Rebase onto base branch'
+    'diff:Show diff against base branch'
+    'log:Show recent commits'
+    'prune:Clean up stale worktrees'
+    'fresh:Run migrate:fresh + npm ci + build'
+    'migrate:Run artisan migrate'
+    'tinker:Run artisan tinker'
+    'code:Open worktree in editor'
+    'open:Open worktree URL in browser'
+    'cd:Print worktree path'
+    'switch:Switch to worktree (cd + code + open)'
+    'exec:Run command in worktree'
+    'doctor:Check system requirements'
+  )
+
+  local -a global_flags
+  global_flags=(
+    '(-q --quiet)'{-q,--quiet}'[Suppress informational output]'
+    '(-f --force)'{-f,--force}'[Skip confirmations / force operations]'
+    '--json[Output in JSON format]'
+    '--delete-branch[Delete branch when removing worktree]'
+    '--drop-db[Drop database when removing worktree]'
+    '--no-backup[Skip database backup when removing worktree]'
+    '(-v --version)'{-v,--version}'[Show version]'
+    '(-h --help)'{-h,--help}'[Show help]'
+  )
+
+  _arguments -C \
+    $global_flags \
+    '1: :->command' \
+    '*:: :->args'
+
+  case $state in
+    command)
+      _describe -t commands 'wt command' commands
+      ;;
+    args)
+      case $line[1] in
+        add)
+          _arguments \
+            '1:repository:_wt_repos' \
+            '2:branch:' \
+            '3:base branch:'
+          ;;
+        rm)
+          _arguments \
+            '1:repository:_wt_repos' \
+            '2:branch:{ _wt_branches $line[1] }'
+          ;;
+        ls|status|pull-all|prune)
+          _arguments '1:repository:_wt_repos'
+          ;;
+        pull|sync|code|open|cd|switch|fresh|migrate|tinker|log|diff)
+          _arguments \
+            '1:repository:_wt_repos' \
+            '2:branch:{ _wt_branches $line[1] }'
+          ;;
+        exec)
+          _arguments \
+            '1:repository:_wt_repos' \
+            '2:branch:{ _wt_branches $line[1] }' \
+            '*:command:_command_names'
+          ;;
+        clone)
+          _arguments \
+            '1:git URL:' \
+            '2:repository name:'
+          ;;
+        repos|doctor)
+          # No arguments
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_wt "$@"
