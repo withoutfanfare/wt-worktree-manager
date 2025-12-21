@@ -35,6 +35,117 @@ Normally, you have one working directory per repository. If you're working on a 
 
 Each worktree is a fully functional working directory with its own `.env`, `vendor/`, `node_modules/`, etc. You can have them all running simultaneously with different URLs in Laravel Herd.
 
+## ⚠️ The Golden Rule: One Branch Per Worktree
+
+**Each worktree is the permanent home for ONE specific branch.** The directory name tells you which branch belongs there.
+
+This is the most important thing to understand about worktrees. If you break this rule, things get confusing fast.
+
+### ❌ DON'T: Switch branches inside a worktree
+
+```bash
+# You're in myapp--feature-login worktree
+cd ~/Herd/myapp--feature-login
+
+# DON'T DO THIS:
+git checkout staging                    # ❌ Wrong!
+git checkout feature/other-thing        # ❌ Wrong!
+git switch main                         # ❌ Wrong!
+```
+
+**Also avoid switching branches via GUI tools** (GitKraken, SourceTree, VS Code Git panel, etc.) when you have a worktree open. The GUI doesn't know about the worktree naming convention.
+
+**Why this breaks things:**
+- The directory `myapp--feature-login` now contains the `staging` branch
+- The directory name is now misleading
+- `wt` commands may behave unexpectedly
+- You might accidentally commit to the wrong branch
+- `wt status` will show a mismatch warning
+
+### ✅ DO: Use wt commands to work on different branches
+
+```bash
+# Want to work on a different branch? Create/switch to its worktree:
+cd "$(wt switch myapp)"                 # Pick with fzf
+cd "$(wt switch myapp staging)"         # Go to staging worktree
+cd "$(wt cd myapp feature/payments)"    # Navigate to specific worktree
+
+# Need a worktree for a new branch? Create one:
+wt add myapp feature/new-thing
+
+# Done with a branch? Remove its worktree:
+wt rm myapp feature/old-thing
+```
+
+### ✅ DO: Use git commands that don't change the checked-out branch
+
+These are all safe inside any worktree:
+
+```bash
+# Safe git operations (don't change which branch is checked out):
+git status                              # ✅ Check status
+git add / git commit                    # ✅ Make commits
+git push / git pull                     # ✅ Sync with remote
+git stash / git stash pop               # ✅ Stash changes
+git log / git diff                      # ✅ View history
+git rebase origin/staging               # ✅ Rebase (or use: wt sync)
+git merge --no-ff feature/x             # ✅ Merge another branch in
+git cherry-pick abc123                  # ✅ Cherry-pick commits
+git show other-branch:file.php          # ✅ View file from another branch
+git diff staging..HEAD                  # ✅ Compare branches
+```
+
+### What about the staging worktree?
+
+The staging worktree (`myapp--staging`) should **always** have the `staging` branch checked out. The same rules apply:
+
+```bash
+# In the staging worktree, you can:
+git pull                                # ✅ Get latest staging
+git merge --no-ff feature/done          # ✅ Merge a feature in
+git push                                # ✅ Push to remote
+
+# But don't:
+git checkout feature/something          # ❌ Don't switch branches here either
+```
+
+If you need to look at or work on a feature, switch to that feature's worktree (or create one).
+
+### Quick mental model
+
+Think of each worktree directory as a **dedicated workspace** for one branch:
+
+| Directory | Branch | Purpose |
+|-----------|--------|---------|
+| `myapp--staging` | `staging` | Integration testing, merges |
+| `myapp--feature-login` | `feature/login` | Login feature development |
+| `myapp--bugfix-cart` | `bugfix/cart` | Cart bug fix |
+
+You don't "switch branches" - you **switch worktrees**. Each branch has its own directory, its own editor window, its own browser tab, its own database.
+
+### If you accidentally switched branches
+
+If you've already run `git checkout` inside a worktree, `wt status` and `wt ls` will warn you:
+
+```text
+⚠ Branch/Directory Mismatches Detected:
+  myapp--feature-login
+    Current branch:  staging
+    Expected dir:    myapp--staging
+    Fix: Checkout correct branch or recreate worktree
+```
+
+**To fix it:**
+
+```bash
+# Option 1: Checkout the correct branch back
+cd ~/Herd/myapp--feature-login
+git checkout feature/login              # Put the right branch back
+
+# Option 2: If you've made commits on the wrong branch,
+#           you may need to cherry-pick or reset
+```
+
 ## Requirements
 
 | Requirement | Status | Notes |
