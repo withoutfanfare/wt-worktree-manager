@@ -1,12 +1,15 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.3.0"
+readonly VERSION="3.4.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
 DEFAULT_BASE="${WT_BASE_DEFAULT:-origin/staging}"
 DEFAULT_EDITOR="${WT_EDITOR:-cursor}"
+
+# URL generation defaults
+WT_URL_SUBDOMAIN="${WT_URL_SUBDOMAIN:-}"  # Optional subdomain prefix (e.g., "api" -> api.feature-name.test)
 
 # Database defaults
 DB_HOST="${WT_DB_HOST:-127.0.0.1}"
@@ -138,6 +141,22 @@ sed_inplace() {
 slugify_branch() {
   local b="$1"
   print -r -- "${b//\//-}"
+}
+
+# Extract feature name from branch (strips prefixes like feature/, bugfix/, etc.)
+# e.g., "feature/sms-unsubscribe" -> "sms-unsubscribe"
+# e.g., "feature/dh/uat/build-test" -> "build-test" (takes last segment)
+# e.g., "staging" -> "staging" (unchanged if no prefix)
+extract_feature_name() {
+  local branch="$1"
+  local result="$branch"
+
+  # If branch contains a slash, extract the last segment
+  if [[ "$branch" == */* ]]; then
+    result="${branch##*/}"
+  fi
+
+  print -r -- "$result"
 }
 
 # Check if worktree directory name matches the branch it's on
@@ -314,8 +333,14 @@ wt_path_for() {
 url_for() {
   local repo="$1"
   local branch="$2"
-  local slug; slug="$(slugify_branch "$branch")"
-  print -r -- "https://${repo}--${slug}.test"
+  local feature; feature="$(extract_feature_name "$branch")"
+
+  # Build URL: [subdomain.]feature-name.test
+  if [[ -n "$WT_URL_SUBDOMAIN" ]]; then
+    print -r -- "https://${WT_URL_SUBDOMAIN}.${feature}.test"
+  else
+    print -r -- "https://${feature}.test"
+  fi
 }
 
 db_name_for() {
@@ -820,7 +845,12 @@ cmd_ls() {
   display_worktree() {
     local idx="$1" path="$2" branch="$3" head="$4"
     local folder="${path:t}"
-    local url="https://${folder}.test"
+    # Read APP_URL from .env if available, otherwise fall back to folder-based URL
+    local url
+    if [[ -f "$path/.env" ]]; then
+      url="$(grep -E '^APP_URL=' "$path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
+    fi
+    [[ -z "$url" ]] && url="https://${folder}.test"
     local sha; sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || true)"
     local st; st="$(git -C "$path" status --porcelain 2>/dev/null || true)"
     local state_icon="●" state_color="$C_GREEN" state_text="clean"
@@ -1987,6 +2017,7 @@ usage() {
   print -r -- "  ${C_YELLOW}WT_BASE_DEFAULT${C_RESET}   Default base branch ${C_DIM}(default: origin/staging)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_EDITOR${C_RESET}         Editor command ${C_DIM}(default: cursor)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_CONFIG${C_RESET}         Config file path ${C_DIM}(default: ~/.wtrc)${C_RESET}"
+  print -r -- "  ${C_YELLOW}WT_URL_SUBDOMAIN${C_RESET}  Optional URL subdomain ${C_DIM}(e.g., api -> api.feature.test)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_HOOKS_DIR${C_RESET}      Hooks directory ${C_DIM}(default: ~/.wt/hooks)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_HOST${C_RESET}        MySQL host ${C_DIM}(default: 127.0.0.1)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_USER${C_RESET}        MySQL user ${C_DIM}(default: root)${C_RESET}"
@@ -2000,6 +2031,7 @@ usage() {
   print -r -- "    HERD_ROOT=/path/to/herd"
   print -r -- "    DEFAULT_BASE=origin/main"
   print -r -- "    DEFAULT_EDITOR=code"
+  print -r -- "    WT_URL_SUBDOMAIN=api       ${C_DIM}# optional: api.feature.test${C_RESET}"
   print -r -- "    DB_USER=root"
   print -r -- "    DB_PASSWORD=secret"
   print -r -- "    DB_BACKUP_DIR=/path/to/backups"
