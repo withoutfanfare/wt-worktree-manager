@@ -478,13 +478,14 @@ wt add myapp feature/new-work origin/main
 
 1. Fetches all branches from remote
 2. Creates the worktree directory at `~/Herd/<repo>--<branch-slug>/`
-3. Copies `.env.example` to `.env` (if exists)
-4. Sets `APP_URL` in `.env` to `https://<repo>--<branch-slug>.test`
-5. Creates a MySQL database named `<repo>__<branch_slug>` (underscores for MySQL compatibility)
-6. Sets `DB_DATABASE` in `.env` to the new database name
-7. Secures the site with HTTPS via `herd secure`
-8. Runs `composer install`
-9. Generates Laravel app key
+3. Pushes new branch to remote and sets correct tracking (prevents accidental pushes to wrong branch)
+4. Copies `.env.example` to `.env` (if exists)
+5. Sets `APP_URL` in `.env` to `https://<repo>--<branch-slug>.test`
+6. Creates a MySQL database named `<repo>__<branch_slug>` (underscores for MySQL compatibility)
+7. Sets `DB_DATABASE` in `.env` to the new database name
+8. Secures the site with HTTPS via `herd secure`
+9. Runs `composer install`
+10. Generates Laravel app key
 
 **Database naming:** Branch slashes become underscores, dashes become underscores:
 - `myapp` + `feature/login` → `myapp__feature_login`
@@ -604,10 +605,17 @@ Output:
   staging                        ●            ↑0 ↓0      a1b2c3d
   feature/login                  ◐ 3          ↑5 ↓12     e4f5g6h
   feature/dashboard              ●            ↑2 ↓0      i7j8k9l
+
+⚠ Branch/Directory Mismatches Detected:
+  myapp--old-feature-name
+    Current branch:  feature/new-name
+    Expected dir:    myapp--feature-new-name
+    Fix: Checkout correct branch or recreate worktree
 ```
 
 - **State**: `●` = clean, `◐ N` = N uncommitted changes
 - **Sync**: `↑N` = commits ahead, `↓N` = commits behind (vs `origin/staging`)
+- **Mismatch warning**: Shown when a worktree's directory name doesn't match its branch (e.g., someone ran `git checkout` inside the worktree)
 
 #### The `ls` command
 
@@ -634,14 +642,29 @@ Output:
     sync    ↑5 ↓12
     url     🌐 https://myapp--feature-login.test
     cd      cd '/Users/you/Herd/myapp--feature-login'
+
+[3] 📁 /Users/you/Herd/myapp--old-feature-name
+    branch  🌿 feature/new-name
+    ⚠️  MISMATCH: Directory suggests 'old-feature-name' but branch is 'feature/new-name'
+    sha     i7j8k9l
+    state   ● clean
+    sync    ↑0 ↓0
+    url     🌐 https://myapp--old-feature-name.test
+    cd      cd '/Users/you/Herd/myapp--old-feature-name'
 ```
+
+- **Mismatch warning**: Shown inline when a worktree's directory name doesn't match its checked-out branch (e.g., if someone ran `git checkout` inside the worktree instead of using `wt add`)
 
 **JSON output:**
 ```bash
 wt ls --json myapp
 ```
 ```json
-[{"path": "/Users/you/Herd/myapp--staging", "branch": "staging", "sha": "a1b2c3d", "url": "https://myapp--staging.test", "dirty": false, "ahead": 0, "behind": 0}]
+[
+  {"path": "/Users/you/Herd/myapp--staging", "branch": "staging", "sha": "a1b2c3d", "url": "https://myapp--staging.test", "dirty": false, "ahead": 0, "behind": 0, "mismatch": false},
+  {"path": "/Users/you/Herd/myapp--feature-login", "branch": "feature/login", "sha": "e4f5g6h", "url": "https://myapp--feature-login.test", "dirty": true, "ahead": 5, "behind": 12, "mismatch": false},
+  {"path": "/Users/you/Herd/myapp--old-feature-name", "branch": "feature/new-name", "sha": "i7j8k9l", "url": "https://myapp--old-feature-name.test", "dirty": false, "ahead": 0, "behind": 0, "mismatch": true}
+]
 ```
 
 #### The `sync` command in detail
@@ -1144,9 +1167,15 @@ MySQL database names are limited to 64 characters. If your repo + branch name ex
 
 ## Version
 
-Current version: **3.0.0**
+Current version: **3.3.0**
 
 Check with: `wt --version`
+
+### What's New in 3.3.0
+
+- **Branch/directory mismatch detection** - `wt ls` and `wt status` now warn when a worktree's directory name doesn't match its checked-out branch (e.g., if someone ran `git checkout` inside a worktree)
+- **Automatic remote tracking setup** - New branches are automatically pushed and set to track their own remote branch (prevents accidental pushes to wrong branch)
+- **JSON output includes mismatch field** - `wt ls --json` now includes `"mismatch": true/false`
 
 ### What's New in 3.0.0
 

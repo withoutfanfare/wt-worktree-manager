@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.2.1"
+readonly VERSION="3.3.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
@@ -138,6 +138,33 @@ sed_inplace() {
 slugify_branch() {
   local b="$1"
   print -r -- "${b//\//-}"
+}
+
+# Check if worktree directory name matches the branch it's on
+# Returns: "ok", "skip", or "mismatch|expected_slug" (pipe-separated for mismatch)
+check_branch_directory_match() {
+  local wt_path="$1"
+  local actual_branch="$2"
+  local repo="$3"
+
+  # Skip bare repo and main worktree (e.g., scooda for staging)
+  local folder="${wt_path:t}"
+  if [[ "$folder" != *"--"* ]]; then
+    print -r -- "skip"
+    return 0
+  fi
+
+  # Extract the slug from directory name (part after repo--)
+  local dir_slug="${folder#*--}"
+
+  # Slugify the actual branch
+  local branch_slug; branch_slug="$(slugify_branch "$actual_branch")"
+
+  if [[ "$dir_slug" != "$branch_slug" ]]; then
+    print -r -- "mismatch|$branch_slug"
+  else
+    print -r -- "ok"
+  fi
 }
 
 # Look up actual worktree path from git by branch name
@@ -798,6 +825,7 @@ cmd_ls() {
     local st; st="$(git -C "$path" status --porcelain 2>/dev/null || true)"
     local state_icon="●" state_color="$C_GREEN" state_text="clean"
     local dirty=false
+    local mismatch=false
 
     if [[ -n "$st" ]]; then
       local changes; changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
@@ -807,12 +835,22 @@ cmd_ls() {
       dirty=true
     fi
 
+    # Check for branch/directory mismatch
+    local match_result="" expected_slug=""
+    if [[ -n "$branch" ]]; then
+      match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
+      if [[ "$match_result" == mismatch\|* ]]; then
+        mismatch=true
+        expected_slug="${match_result#mismatch|}"
+      fi
+    fi
+
     # Get ahead/behind
     local counts; counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
     local ahead="${counts%% *}" behind="${counts##* }"
 
     if [[ "$JSON_OUTPUT" == true ]]; then
-      json_items+=("{\"path\": \"$(json_escape "$path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind}")
+      json_items+=("{\"path\": \"$(json_escape "$path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind, \"mismatch\": $mismatch}")
     else
       print -r -- "${C_BOLD}[$idx]${C_RESET} 📁 ${C_CYAN}$path${C_RESET}"
       if [[ -n "$branch" ]]; then
@@ -827,6 +865,10 @@ cmd_ls() {
       fi
       print -r -- "    ${C_DIM}url${C_RESET}     🌐 ${C_BLUE}$url${C_RESET}"
       print -r -- "    ${C_DIM}cd${C_RESET}      ${C_DIM}cd ${(q)path}${C_RESET}"
+      if [[ "$mismatch" == true ]]; then
+        print -r -- "    ${C_RED}⚠ MISMATCH${C_RESET} Directory name doesn't match branch!"
+        print -r -- "      ${C_DIM}Expected:${C_RESET} ${repo}--${expected_slug}"
+      fi
       print -r -- ""
     fi
   }
@@ -883,6 +925,7 @@ cmd_status() {
 
   local path="" branch="" head="" line=""
   local sha st state_icon state_color changes counts ahead behind
+  local mismatches=()
 
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
@@ -897,6 +940,13 @@ cmd_status() {
           changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
           state_icon="◐ $changes"
           state_color="$C_YELLOW"
+        fi
+
+        # Check for mismatch
+        local match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
+        if [[ "$match_result" == mismatch\|* ]]; then
+          local expected_slug="${match_result#mismatch|}"
+          mismatches+=("${path:t}|$branch|$expected_slug")
         fi
 
         counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
@@ -930,12 +980,35 @@ cmd_status() {
       state_color="$C_YELLOW"
     fi
 
+    # Check for mismatch
+    local match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
+    if [[ "$match_result" == mismatch\|* ]]; then
+      local expected_slug="${match_result#mismatch|}"
+      mismatches+=("${path:t}|$branch|$expected_slug")
+    fi
+
     counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
     ahead="${counts%% *}"
     behind="${counts##* }"
 
     printf "  %-30s ${state_color}%-12s${C_RESET} %-10s ${C_DIM}%-15s${C_RESET}\n" \
       "${branch:0:28}" "$state_icon" "↑$ahead ↓$behind" "$sha"
+  fi
+
+  # Show mismatch warnings
+  if (( ${#mismatches[@]} > 0 )); then
+    print -r -- ""
+    print -r -- "${C_RED}${C_BOLD}⚠ Branch/Directory Mismatches Detected:${C_RESET}"
+    for m in "${mismatches[@]}"; do
+      local dir="${m%%|*}"
+      local rest="${m#*|}"
+      local actual_branch="${rest%%|*}"
+      local expected_slug="${rest#*|}"
+      print -r -- "  ${C_YELLOW}$dir${C_RESET}"
+      print -r -- "    ${C_DIM}Current branch:${C_RESET}  ${C_MAGENTA}$actual_branch${C_RESET}"
+      print -r -- "    ${C_DIM}Expected dir:${C_RESET}    ${repo}--${expected_slug}"
+      print -r -- "    ${C_DIM}Fix:${C_RESET} Checkout correct branch or recreate worktree"
+    done
   fi
 
   print -r -- ""
