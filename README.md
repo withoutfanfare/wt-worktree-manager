@@ -17,6 +17,7 @@ A command-line tool for managing Git worktrees with Laravel Herd integration. Wo
 - **Interactive Selection** - fzf-powered branch picking
 - **Claude Code Integration** - Isolated AI sessions per worktree
 - **macOS Notifications** - Get notified when long operations complete
+- **Customisable Hooks** - Run your own scripts after worktree creation
 
 ## What are Git Worktrees?
 
@@ -166,6 +167,7 @@ These can be set in your shell or config file:
 | `WT_BASE_DEFAULT` | `origin/staging` | Default branch for new worktrees |
 | `WT_EDITOR` | `cursor` | Editor for `wt code` command |
 | `WT_CONFIG` | `~/.wtrc` | Path to config file |
+| `WT_HOOKS_DIR` | `~/.wt/hooks` | Directory containing hook scripts |
 | `WT_DB_HOST` | `127.0.0.1` | MySQL host for database operations |
 | `WT_DB_USER` | `root` | MySQL user for database operations |
 | `WT_DB_PASSWORD` | (empty) | MySQL password for database operations |
@@ -173,6 +175,109 @@ These can be set in your shell or config file:
 | `WT_DB_BACKUP` | `true` | Backup database on `wt rm` |
 | `WT_DB_BACKUP_DIR` | `~/Code/Project Support/Worktree/Database/Backup` | Backup directory |
 | `WT_PROTECTED_BRANCHES` | `staging main master` | Space-separated list of protected branches |
+
+### Hooks
+
+Hooks allow you to run custom scripts after certain wt operations. This is useful for automating setup steps specific to your workflow.
+
+#### Available hooks
+
+| Hook | Trigger | Description |
+|------|---------|-------------|
+| `post-add` | After `wt add` | Runs after worktree creation completes |
+
+#### Creating a hook
+
+1. Create the hooks directory:
+   ```bash
+   mkdir -p ~/.wt/hooks
+   ```
+
+2. Create an executable script with the hook name:
+   ```bash
+   # ~/.wt/hooks/post-add
+   #!/bin/bash
+
+   # Run npm install and build assets
+   npm ci
+   npm run build
+
+   # Run database migrations
+   php artisan migrate
+
+   # Clear caches
+   php artisan config:clear
+   php artisan route:clear
+   ```
+
+3. Make it executable:
+   ```bash
+   chmod +x ~/.wt/hooks/post-add
+   ```
+
+#### Environment variables in hooks
+
+Hooks receive context about the worktree via environment variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `WT_REPO` | Repository name | `myapp` |
+| `WT_BRANCH` | Branch name | `feature/login` |
+| `WT_PATH` | Worktree path | `/Users/you/Herd/myapp--feature-login` |
+| `WT_URL` | Application URL | `https://myapp--feature-login.test` |
+| `WT_DB_NAME` | Database name | `myapp__feature_login` |
+| `WT_HOOK_NAME` | Current hook name | `post-add` |
+
+#### Example: Conditional hook
+
+```bash
+#!/bin/bash
+# ~/.wt/hooks/post-add
+
+# Only run npm for repos that have package.json
+if [[ -f "package.json" ]]; then
+  npm ci
+  npm run build
+fi
+
+# Only run migrations for Laravel projects
+if [[ -f "artisan" ]]; then
+  php artisan migrate
+fi
+
+# Log the creation
+echo "$(date): Created $WT_REPO / $WT_BRANCH" >> ~/.wt/worktree.log
+```
+
+#### Multiple hooks
+
+For complex setups, create a `.d` directory with numbered scripts:
+
+```text
+~/.wt/hooks/
+├── post-add              # Single hook (runs first if exists)
+└── post-add.d/           # Multiple hooks (run in order)
+    ├── 01-npm.sh
+    ├── 02-migrate.sh
+    └── 03-notify.sh
+```
+
+All executable scripts in the `.d` directory run in alphabetical order.
+
+#### Verify hooks with doctor
+
+Check your hooks configuration:
+
+```bash
+wt doctor
+```
+
+Output includes:
+```text
+Hooks
+✔ Hooks directory: /Users/you/.wt/hooks
+✔   post-add: enabled
+```
 
 ## Getting Started
 

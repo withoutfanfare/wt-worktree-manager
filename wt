@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.2.0"
+readonly VERSION="3.2.1"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
@@ -15,6 +15,9 @@ DB_PASSWORD="${WT_DB_PASSWORD:-}"
 DB_CREATE="${WT_DB_CREATE:-true}"
 DB_BACKUP_DIR="${WT_DB_BACKUP_DIR:-$HOME/Code/Project Support/Worktree/Database/Backup}"
 DB_BACKUP="${WT_DB_BACKUP:-true}"
+
+# Hooks directory (for custom post-add scripts, etc.)
+WT_HOOKS_DIR="${WT_HOOKS_DIR:-$HOME/.wt/hooks}"
 
 # Global flags
 QUIET=false
@@ -500,6 +503,78 @@ json_escape() {
   print -r -- "$s"
 }
 
+# Run hooks for a given event
+# Usage: run_hooks <hook_name> <repo> <branch> <wt_path> <app_url> <db_name>
+# Example: run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
+run_hooks() {
+  local hook_name="$1"
+  local repo="$2"
+  local branch="$3"
+  local wt_path="$4"
+  local app_url="$5"
+  local db_name="$6"
+
+  # Check if hooks directory exists
+  [[ -d "$WT_HOOKS_DIR" ]] || return 0
+
+  local hook_file="$WT_HOOKS_DIR/$hook_name"
+
+  # Check if hook exists and is executable
+  if [[ -x "$hook_file" ]]; then
+    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+
+    # Export environment variables for the hook
+    (
+      export WT_REPO="$repo"
+      export WT_BRANCH="$branch"
+      export WT_PATH="$wt_path"
+      export WT_URL="$app_url"
+      export WT_DB_NAME="$db_name"
+      export WT_HOOK_NAME="$hook_name"
+
+      # Run hook from the worktree directory
+      cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+      if "$hook_file"; then
+        ok "Hook ${C_CYAN}$hook_name${C_RESET} completed"
+      else
+        warn "Hook ${C_CYAN}$hook_name${C_RESET} exited with non-zero status"
+      fi
+    )
+  elif [[ -f "$hook_file" ]]; then
+    dim "  💡 Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
+  fi
+
+  # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks)
+  local hooks_d="$WT_HOOKS_DIR/${hook_name}.d"
+  if [[ -d "$hooks_d" ]]; then
+    for hook_script in "$hooks_d"/*(*)(N); do
+      [[ -x "$hook_script" ]] || continue
+      local script_name="${hook_script:t}"
+      info "Running ${C_CYAN}$hook_name.d/$script_name${C_RESET}..."
+
+      (
+        export WT_REPO="$repo"
+        export WT_BRANCH="$branch"
+        export WT_PATH="$wt_path"
+        export WT_URL="$app_url"
+        export WT_DB_NAME="$db_name"
+        export WT_HOOK_NAME="$hook_name"
+
+        cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+        if "$hook_script"; then
+          ok "  $script_name completed"
+        else
+          warn "  $script_name exited with non-zero status"
+        fi
+      )
+    done
+  fi
+
+  return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # COMMANDS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -539,7 +614,17 @@ cmd_add() {
     git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
   else
     info "Creating branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    git --git-dir="$git_dir" worktree add -b "$branch" "$wt_path" "$base"
+    # Use --no-track to prevent auto-tracking the base branch
+    git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
+  fi
+
+  # Set up proper remote tracking for the branch (track its own remote, not the base)
+  # Push to create remote branch and set tracking in one step
+  info "Setting up remote tracking for ${C_MAGENTA}$branch${C_RESET}"
+  if GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" push -u origin "$branch:$branch" 2>/dev/null; then
+    ok "Remote branch created and tracking set"
+  else
+    dim "  💡 Push failed (may need to push manually later): git push -u origin $branch"
   fi
 
   # Setup worktree
@@ -596,6 +681,9 @@ cmd_add() {
   cleanup_needed=false
   trap - EXIT
 
+  # Run post-add hooks
+  run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
+
   if [[ "$JSON_OUTPUT" == true ]]; then
     print -r -- "{\"path\": \"$(json_escape "$wt_path")\", \"url\": \"$(json_escape "$app_url")\", \"branch\": \"$(json_escape "$branch")\", \"database\": \"$(json_escape "$db_name")\"}"
   else
@@ -624,6 +712,7 @@ cmd_rm() {
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
+  local app_url; app_url="$(url_for "$repo" "$branch")"
   local db_name; db_name="$(db_name_for "$repo" "$branch")"
   local site_name="${wt_path:t}"
 
@@ -660,7 +749,11 @@ cmd_rm() {
   unsecure_site "$site_name"
 
   info "Removing worktree ${C_CYAN}$wt_path${C_RESET}"
-  git --git-dir="$git_dir" worktree remove "$wt_path"
+  if [[ "$FORCE" == true ]]; then
+    git --git-dir="$git_dir" worktree remove --force "$wt_path"
+  else
+    git --git-dir="$git_dir" worktree remove "$wt_path"
+  fi
 
   # Delete branch if requested
   if [[ "$DELETE_BRANCH" == true ]]; then
@@ -675,6 +768,9 @@ cmd_rm() {
 
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
+
+  # Run post-rm hooks
+  run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   ok "Worktree removed"
   print -r -- ""
@@ -1370,12 +1466,122 @@ cmd_doctor() {
   fi
 
   print -r -- ""
+  print -r -- "${C_BOLD}Hooks${C_RESET}"
+
+  if [[ -d "$WT_HOOKS_DIR" ]]; then
+    ok "Hooks directory: $WT_HOOKS_DIR"
+
+    # Check for post-add hook
+    if [[ -x "$WT_HOOKS_DIR/post-add" ]]; then
+      ok "  post-add: enabled"
+    elif [[ -f "$WT_HOOKS_DIR/post-add" ]]; then
+      warn "  post-add: exists but not executable"
+    else
+      dim "  post-add: not configured"
+    fi
+
+    # Check for post-add.d directory
+    if [[ -d "$WT_HOOKS_DIR/post-add.d" ]]; then
+      local hook_count; hook_count="$(ls -1 "$WT_HOOKS_DIR/post-add.d" 2>/dev/null | wc -l | tr -d ' ')" || hook_count=0
+      if (( hook_count > 0 )); then
+        ok "  post-add.d/: $hook_count script(s)"
+      fi
+    fi
+
+    # Check for post-rm hook
+    if [[ -x "$WT_HOOKS_DIR/post-rm" ]]; then
+      ok "  post-rm: enabled"
+    elif [[ -f "$WT_HOOKS_DIR/post-rm" ]]; then
+      warn "  post-rm: exists but not executable"
+    else
+      dim "  post-rm: not configured"
+    fi
+
+    # Check for post-rm.d directory
+    if [[ -d "$WT_HOOKS_DIR/post-rm.d" ]]; then
+      local hook_count; hook_count="$(ls -1 "$WT_HOOKS_DIR/post-rm.d" 2>/dev/null | wc -l | tr -d ' ')" || hook_count=0
+      if (( hook_count > 0 )); then
+        ok "  post-rm.d/: $hook_count script(s)"
+      fi
+    fi
+  else
+    dim "  Hooks directory: $WT_HOOKS_DIR (not found)"
+    dim "  💡 Create hooks with: mkdir -p $WT_HOOKS_DIR"
+  fi
+
+  print -r -- ""
   if (( issues > 0 )); then
     warn "$issues issue(s) found"
   else
     ok "All checks passed!"
   fi
   print -r -- ""
+}
+
+cmd_unlock() {
+  local repo="${1:-}"
+
+  # Auto-detect from current directory if no args
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    dim "  Detected: $repo"
+  fi
+
+  if [[ -n "$repo" ]]; then
+    # Unlock specific repo
+    validate_name "$repo" "repository"
+    local git_dir; git_dir="$(git_dir_for "$repo")"
+    ensure_bare_repo "$git_dir"
+
+    local worktrees_dir="$git_dir/worktrees"
+    if [[ ! -d "$worktrees_dir" ]]; then
+      dim "No worktrees directory found for $repo"
+      return 0
+    fi
+
+    local count=0
+    for lock_file in "$worktrees_dir"/*/index.lock(N); do
+      if [[ -f "$lock_file" ]]; then
+        local wt_name="${${lock_file:h}:t}"
+        rm -f "$lock_file"
+        ok "Removed lock: ${C_CYAN}$wt_name${C_RESET}"
+        count=$((count + 1))
+      fi
+    done
+
+    if (( count == 0 )); then
+      ok "No stale lock files found for ${C_CYAN}$repo${C_RESET}"
+    else
+      ok "Removed ${C_BOLD}$count${C_RESET} lock file(s)"
+    fi
+  else
+    # Unlock all repos
+    info "Scanning all repositories..."
+    local total=0
+
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      local worktrees_dir="$git_dir/worktrees"
+
+      [[ -d "$worktrees_dir" ]] || continue
+
+      for lock_file in "$worktrees_dir"/*/index.lock(N); do
+        if [[ -f "$lock_file" ]]; then
+          local wt_name="${${lock_file:h}:t}"
+          rm -f "$lock_file"
+          ok "Removed lock: ${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}$wt_name${C_RESET}"
+          total=$((total + 1))
+        fi
+      done
+    done
+
+    if (( total == 0 )); then
+      ok "No stale lock files found"
+    else
+      ok "Removed ${C_BOLD}$total${C_RESET} lock file(s)"
+    fi
+  fi
 }
 
 cmd_fresh() {
@@ -1678,6 +1884,7 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
+  print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
@@ -1707,6 +1914,7 @@ usage() {
   print -r -- "  ${C_YELLOW}WT_BASE_DEFAULT${C_RESET}   Default base branch ${C_DIM}(default: origin/staging)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_EDITOR${C_RESET}         Editor command ${C_DIM}(default: cursor)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_CONFIG${C_RESET}         Config file path ${C_DIM}(default: ~/.wtrc)${C_RESET}"
+  print -r -- "  ${C_YELLOW}WT_HOOKS_DIR${C_RESET}      Hooks directory ${C_DIM}(default: ~/.wt/hooks)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_HOST${C_RESET}        MySQL host ${C_DIM}(default: 127.0.0.1)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_USER${C_RESET}        MySQL user ${C_DIM}(default: root)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_PASSWORD${C_RESET}    MySQL password ${C_DIM}(default: empty)${C_RESET}"
@@ -1722,6 +1930,26 @@ usage() {
   print -r -- "    DB_USER=root"
   print -r -- "    DB_PASSWORD=secret"
   print -r -- "    DB_BACKUP_DIR=/path/to/backups"
+  print -r -- ""
+  print -r -- "${C_BOLD}HOOKS${C_RESET}"
+  print -r -- "  Create executable scripts in ${C_CYAN}~/.wt/hooks/${C_RESET} to run custom commands:"
+  print -r -- ""
+  print -r -- "  ${C_GREEN}post-add${C_RESET}     Run after worktree creation (wt add)"
+  print -r -- "  ${C_GREEN}post-rm${C_RESET}      Run after worktree removal (wt rm)"
+  print -r -- ""
+  print -r -- "  ${C_DIM}Available environment variables in hooks:${C_RESET}"
+  print -r -- "    WT_REPO       Repository name"
+  print -r -- "    WT_BRANCH     Branch name"
+  print -r -- "    WT_PATH       Worktree path"
+  print -r -- "    WT_URL        Application URL"
+  print -r -- "    WT_DB_NAME    Database name"
+  print -r -- ""
+  print -r -- "  ${C_DIM}Example ~/.wt/hooks/post-add:${C_RESET}"
+  print -r -- "    #!/bin/bash"
+  print -r -- "    npm ci && npm run build"
+  print -r -- "    php artisan migrate"
+  print -r -- ""
+  print -r -- "  ${C_DIM}Multiple hooks: Create ~/.wt/hooks/post-add.d/ with numbered scripts${C_RESET}"
   print -r -- ""
 }
 
@@ -1771,6 +1999,7 @@ main() {
     prune)    cmd_prune "$@" ;;
     repos)    cmd_repos "$@" ;;
     doctor)   cmd_doctor "$@" ;;
+    unlock)   cmd_unlock "$@" ;;
     fresh)    cmd_fresh "$@" ;;
     switch)   cmd_switch "$@" ;;
     migrate)  cmd_migrate "$@" ;;

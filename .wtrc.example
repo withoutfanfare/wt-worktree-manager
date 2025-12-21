@@ -58,6 +58,36 @@ HERD_ROOT=$HOME/Herd
 # PROTECTED_BRANCHES="staging main master"
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# HOOKS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Directory containing hook scripts
+# Default: ~/.wt/hooks
+# WT_HOOKS_DIR="$HOME/.wt/hooks"
+
+# Available hooks:
+#   post-add    Run after 'wt add' creates a worktree
+#
+# Create executable scripts in WT_HOOKS_DIR with the hook name.
+# The following environment variables are available in hooks:
+#   WT_REPO       Repository name
+#   WT_BRANCH     Branch name
+#   WT_PATH       Worktree path
+#   WT_URL        Application URL
+#   WT_DB_NAME    Database name
+#
+# Example ~/.wt/hooks/post-add:
+#   #!/bin/bash
+#   # Run npm install and migrations after creating a worktree
+#   npm ci
+#   npm run build
+#   php artisan migrate
+#
+# For multiple hooks, create a directory with numbered scripts:
+#   ~/.wt/hooks/post-add.d/01-npm.sh
+#   ~/.wt/hooks/post-add.d/02-migrate.sh
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # PROJECT-SPECIFIC CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 #
