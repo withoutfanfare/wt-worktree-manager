@@ -75,6 +75,8 @@ _wt() {
     'switch:Switch to worktree (cd + code + open)'
     'exec:Run command in worktree'
     'doctor:Check system requirements'
+    'cleanup-herd:Remove orphaned Herd nginx configs'
+    'unlock:Remove stale git lock files'
   )
 
   local -a global_flags
@@ -130,8 +132,11 @@ _wt() {
             '1:git URL:' \
             '2:repository name:'
           ;;
-        repos|doctor)
+        repos|doctor|cleanup-herd)
           # No arguments
+          ;;
+        unlock)
+          _arguments '1:repository:_wt_repos'
           ;;
       esac
       ;;

@@ -1,10 +1,11 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.4.0"
+readonly VERSION="3.5.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
+HERD_CONFIG="${HERD_CONFIG:-$HOME/Library/Application Support/Herd/config}"
 DEFAULT_BASE="${WT_BASE_DEFAULT:-origin/staging}"
 DEFAULT_EDITOR="${WT_EDITOR:-cursor}"
 
@@ -477,6 +478,36 @@ unsecure_site() {
   else
     # Site might not be secured, which is fine
     dim "  💡 Site was not secured or already unsecured"
+  fi
+
+  # Clean up Herd nginx configs and certificates to prevent stale config issues
+  cleanup_herd_site "$site_name"
+}
+
+# Remove stale Herd nginx configs and certificates for a site
+# This prevents nginx from failing to start due to missing certificate files
+cleanup_herd_site() {
+  local site_name="$1"
+  local site_domain="${site_name}.test"
+  local nginx_config="$HERD_CONFIG/valet/Nginx/$site_domain"
+  local cert_dir="$HERD_CONFIG/valet/Certificates"
+  local cleaned=false
+
+  # Remove nginx config if it exists
+  if [[ -f "$nginx_config" ]]; then
+    /bin/rm -f "$nginx_config" 2>/dev/null && cleaned=true
+  fi
+
+  # Remove certificate files (crt, key, csr, conf)
+  for ext in crt key csr conf; do
+    local cert_file="$cert_dir/${site_domain}.${ext}"
+    if [[ -f "$cert_file" ]]; then
+      /bin/rm -f "$cert_file" 2>/dev/null && cleaned=true
+    fi
+  done
+
+  if [[ "$cleaned" == true ]]; then
+    dim "  💡 Cleaned up Herd nginx config and certificates"
   fi
 }
 
@@ -1124,8 +1155,8 @@ cmd_pull_all() {
   info "Pulling $total worktree(s) in parallel..."
 
   # Create temp directory for results
-  local tmpdir; tmpdir="$(mktemp -d)"
-  trap "rm -rf '$tmpdir'" EXIT
+  local tmpdir; tmpdir="$(/usr/bin/mktemp -d)"
+  trap "/bin/rm -rf '$tmpdir'" EXIT
 
   # Launch parallel pulls
   local pids=()
@@ -1154,7 +1185,7 @@ cmd_pull_all() {
   idx=0
   for wt_entry in "${worktrees[@]}"; do
     local wt_branch="${wt_entry##*|}"
-    if [[ -f "$tmpdir/$idx" && "$(cat "$tmpdir/$idx")" == "ok" ]]; then
+    if [[ -f "$tmpdir/$idx" && "$(/bin/cat "$tmpdir/$idx")" == "ok" ]]; then
       ok "  $wt_branch"
       count=$((count + 1))
     else
@@ -1164,7 +1195,7 @@ cmd_pull_all() {
     idx=$((idx + 1))
   done
 
-  rm -rf "$tmpdir"
+  /bin/rm -rf "$tmpdir"
   trap - EXIT
 
   print -r -- ""
@@ -1621,6 +1652,93 @@ cmd_doctor() {
   print -r -- ""
 }
 
+# Clean up orphaned Herd nginx configs and certificates
+# Finds configs for sites that no longer have corresponding worktrees
+cmd_cleanup_herd() {
+  print -r -- ""
+  print -r -- "${C_BOLD}🧹 Cleaning orphaned Herd configs${C_RESET}"
+  print -r -- ""
+
+  if ! command -v herd >/dev/null 2>&1; then
+    die "Herd is not installed"
+  fi
+
+  local nginx_dir="$HERD_CONFIG/valet/Nginx"
+  local cert_dir="$HERD_CONFIG/valet/Certificates"
+  local orphaned=()
+  local cleaned=0
+
+  if [[ ! -d "$nginx_dir" ]]; then
+    warn "Nginx config directory not found: $nginx_dir"
+    return 1
+  fi
+
+  info "Scanning for orphaned configs..."
+
+  # Find all nginx configs that look like worktree sites (contain --)
+  for config in "$nginx_dir"/*--*.test(N); do
+    [[ -f "$config" ]] || continue
+    local site_name="${config:t}"  # e.g., scooda--feature-xyz.test
+    local folder_name="${site_name%.test}"  # e.g., scooda--feature-xyz
+    local wt_path="$HERD_ROOT/$folder_name"
+
+    # Check if the worktree directory exists
+    if [[ ! -d "$wt_path" ]]; then
+      orphaned+=("$site_name")
+    fi
+  done
+
+  if (( ${#orphaned[@]} == 0 )); then
+    ok "No orphaned configs found"
+    print -r -- ""
+    return 0
+  fi
+
+  print -r -- ""
+  warn "Found ${C_BOLD}${#orphaned[@]}${C_RESET}${C_YELLOW} orphaned config(s):${C_RESET}"
+  for site in "${orphaned[@]}"; do
+    print -r -- "  ${C_DIM}•${C_RESET} $site"
+  done
+  print -r -- ""
+
+  if [[ "$FORCE" == false ]]; then
+    print -n "${C_YELLOW}Remove these orphaned configs? [y/N]${C_RESET} "
+    local response
+    read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || { dim "Aborted"; return 0; }
+  fi
+
+  print -r -- ""
+  for site_name in "${orphaned[@]}"; do
+    local folder_name="${site_name%.test}"
+    info "Cleaning ${C_CYAN}$site_name${C_RESET}"
+
+    # Remove nginx config
+    local nginx_config="$nginx_dir/$site_name"
+    if [[ -f "$nginx_config" ]]; then
+      /bin/rm -f "$nginx_config" 2>/dev/null
+    fi
+
+    # Remove certificate files
+    for ext in crt key csr conf; do
+      local cert_file="$cert_dir/${site_name}.${ext}"
+      if [[ -f "$cert_file" ]]; then
+        /bin/rm -f "$cert_file" 2>/dev/null
+      fi
+    done
+
+    cleaned=$((cleaned + 1))
+  done
+
+  # Restart nginx to apply changes
+  info "Restarting Herd nginx..."
+  herd restart >/dev/null 2>&1
+
+  print -r -- ""
+  ok "Cleaned ${C_BOLD}$cleaned${C_RESET} orphaned config(s)"
+  print -r -- ""
+}
+
 cmd_unlock() {
   local repo="${1:-}"
 
@@ -1987,6 +2105,7 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
+  print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
   print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
   print -r -- ""
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
@@ -2104,6 +2223,7 @@ main() {
     prune)    cmd_prune "$@" ;;
     repos)    cmd_repos "$@" ;;
     doctor)   cmd_doctor "$@" ;;
+    cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)   cmd_unlock "$@" ;;
     fresh)    cmd_fresh "$@" ;;
     switch)   cmd_switch "$@" ;;
