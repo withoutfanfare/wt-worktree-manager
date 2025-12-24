@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.0] - 2025-12-24
+
+### Security
+- **Config file hardening** - Configuration files are now parsed as key-value pairs instead of sourced, preventing arbitrary code execution via malicious `.wtrc` files
+- **Hook execution security** - Hooks are now verified to be owned by the current user and not world-writable before execution
+- **Input validation hardening** - Added protection against absolute paths, git flag injection (branches starting with `-`), reserved git references (`HEAD`, `refs/`), and malformed paths
+
+### Added
+- **`wt health <repo>`** - New command to check repository health (stale worktrees, orphaned databases, missing .env files, branch mismatches)
+- **`wt report <repo>`** - New command to generate markdown status report with worktree summary, status, and hook availability
+- **Additional lifecycle hooks** - Added `pre-add`, `pre-rm`, `post-pull`, and `post-sync` hooks alongside existing `post-add` and `post-rm`
+  - Pre-hooks can abort operations by returning non-zero exit code
+- Database names are now automatically truncated with a hash suffix if they exceed MySQL's 64-character limit
+- Confirmation prompt before `wt fresh` runs `migrate:fresh` (use `-f` to skip)
+
 ### Fixed
 - Explicitly fetch remote base branches when using `origin/...` to ensure the latest version is used
 - Branches with slashes (e.g., `origin/proj-jl/rethink`) are now properly fetched before creating worktrees

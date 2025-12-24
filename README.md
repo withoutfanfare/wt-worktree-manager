@@ -229,6 +229,69 @@ These can be set in your shell or config file:
 | `WT_DB_BACKUP` | `true` | Backup database on `wt rm` |
 | `WT_DB_BACKUP_DIR` | `~/Code/Project Support/Worktree/Database/Backup` | Backup directory |
 | `WT_PROTECTED_BRANCHES` | `staging main master` | Space-separated list of protected branches |
+| `WT_HOOKS_DIR` | `~/.wt/hooks` | Directory for hook scripts |
+| `WT_URL_SUBDOMAIN` | (empty) | Optional subdomain prefix (e.g., `api` → `api.feature.test`) |
+
+### Hooks
+
+Hooks allow you to run custom scripts at various points in the worktree lifecycle. Create executable scripts in `~/.wt/hooks/`:
+
+| Hook | When it runs | Can abort? |
+|------|--------------|------------|
+| `pre-add` | Before worktree creation | Yes |
+| `post-add` | After worktree creation | No |
+| `pre-rm` | Before worktree removal | Yes |
+| `post-rm` | After worktree removal | No |
+| `post-pull` | After `wt pull` succeeds | No |
+| `post-sync` | After `wt sync` succeeds | No |
+
+**Available environment variables in hooks:**
+
+| Variable | Description |
+|----------|-------------|
+| `WT_REPO` | Repository name |
+| `WT_BRANCH` | Branch name |
+| `WT_PATH` | Worktree directory path |
+| `WT_URL` | Application URL |
+| `WT_DB_NAME` | Database name |
+
+**Example: post-add hook**
+
+```bash
+#!/bin/bash
+# ~/.wt/hooks/post-add
+
+echo "Setting up $WT_BRANCH..."
+cd "$WT_PATH"
+npm ci
+npm run build
+php artisan migrate
+```
+
+**Example: pre-rm hook (with abort)**
+
+```bash
+#!/bin/bash
+# ~/.wt/hooks/pre-rm
+
+# Prevent removal if there are uncommitted changes
+cd "$WT_PATH"
+if ! git diff --quiet; then
+    echo "ERROR: Uncommitted changes in $WT_BRANCH"
+    exit 1  # Non-zero exit aborts the removal
+fi
+```
+
+**Multiple hooks:** Create a `.d` directory (e.g., `~/.wt/hooks/post-add.d/`) with numbered scripts:
+
+```text
+~/.wt/hooks/post-add.d/
+├── 01-npm-install.sh
+├── 02-build-assets.sh
+└── 03-run-migrations.sh
+```
+
+**Security:** Hooks are verified before execution - they must be owned by the current user and not be world-writable.
 
 ## Getting Started
 
@@ -315,6 +378,12 @@ wt rm <repo> <branch>           # Remove worktree (backs up DB)
 wt rm --drop-db <repo> <branch> # Remove and drop database
 wt rm --no-backup <repo> <branch> # Remove without backup
 wt prune -f <repo>              # Delete merged branches
+
+# Maintenance
+wt health <repo>                # Check repository health
+wt report <repo>                # Generate markdown status report
+wt cleanup-herd                 # Remove orphaned Herd nginx configs
+wt unlock <repo>                # Remove stale git lock files
 ```
 
 ## Commands Reference
@@ -729,6 +798,11 @@ Displays the last 15 commits in a compact one-line format with relative dates.
 | `wt clone <url> [name]` | Clone as bare repo (auto-creates staging) |
 | `wt prune <repo>` | Clean up stale worktrees and merged branches |
 | `wt exec <repo> <branch> <cmd>` | Run command in worktree |
+| `wt health <repo>` | Check repository health |
+| `wt report <repo> [--output <file>]` | Generate markdown status report |
+| `wt doctor` | Check system requirements |
+| `wt cleanup-herd` | Remove orphaned Herd nginx configs |
+| `wt unlock [repo]` | Remove stale git lock files |
 
 #### The `clone` command
 
@@ -802,6 +876,90 @@ wt prune myapp -f
 - Never deletes `staging`, `main`, or `master` branches
 - Only deletes **local** branches (never touches remote branches)
 - Branches checked out in a worktree cannot be deleted until the worktree is removed
+
+#### The `health` command
+
+Performs a comprehensive health check on a repository, identifying potential issues.
+
+```bash
+wt health myapp
+```
+
+**What it checks:**
+
+1. **Stale worktrees** - Worktree references pointing to directories that no longer exist
+2. **Orphaned databases** - MySQL databases matching the repo pattern without corresponding worktrees
+3. **Missing .env files** - Worktrees with `.env.example` but no `.env` file
+4. **Branch consistency** - Directory names that don't match their checked-out branch
+
+**Example output:**
+```text
+🏥 Health Check: myapp
+
+Stale Worktrees
+✔ No stale worktrees
+
+Database Health
+✔ No orphaned databases found
+
+Environment Files
+✔ All worktrees have .env files
+
+Branch Consistency
+✔ All worktrees match their expected branches
+
+Summary
+✔ No issues found - repository is healthy! 🎉
+```
+
+#### The `report` command
+
+Generates a markdown status report for all worktrees in a repository.
+
+```bash
+# Output to console
+wt report myapp
+
+# Save to file
+wt report myapp --output ~/Desktop/worktree-report.md
+```
+
+**What's included:**
+
+- Summary table with total, clean, and dirty worktree counts
+- Per-worktree details: branch, status, ahead/behind counts, last commit
+- List of available lifecycle hooks
+
+**Example output:**
+```markdown
+# Worktree Report: myapp
+
+Generated: 2025-12-24 10:30:00
+
+## Summary
+
+| Metric | Count |
+|--------|-------|
+| Total worktrees | 5 |
+| Clean | 3 |
+| With changes | 2 |
+
+## Worktrees
+
+| Branch | Status | Ahead | Behind | Last Commit |
+|--------|--------|-------|--------|-------------|
+| `staging` | ✅ | 0 | 0 | Merge pull request #123... |
+| `feature/auth` | ⚠️ 3 changes | 2 | 0 | Add login validation |
+
+## Hooks Available
+
+- ✅ `pre-add`
+- ✅ `post-add`
+- ⬜ `pre-rm`
+- ⬜ `post-rm`
+- ⬜ `post-pull`
+- ⬜ `post-sync`
+```
 
 ### Flags
 
@@ -1115,9 +1273,31 @@ MySQL database names are limited to 64 characters. If your repo + branch name ex
 
 ## Version
 
-Current version: **3.5.0**
+Current version: **3.6.0**
 
 Check with: `wt --version`
+
+### What's New in 3.6.0
+
+**New commands:**
+- **`wt health <repo>`** - Check repository health (stale worktrees, orphaned databases, missing .env files, branch mismatches)
+- **`wt report <repo>`** - Generate markdown status report with worktree summary, status, and hook availability
+
+**New lifecycle hooks:**
+- **`pre-add`** - Runs before worktree creation (can abort with non-zero exit)
+- **`pre-rm`** - Runs before worktree removal (can abort with non-zero exit)
+- **`post-pull`** - Runs after `wt pull` succeeds
+- **`post-sync`** - Runs after `wt sync` succeeds
+
+**Security hardening:**
+- **Config file security** - Configuration files are now parsed as key-value pairs instead of sourced, preventing arbitrary code execution via malicious `.wtrc` files
+- **Hook execution security** - Hooks are verified to be owned by the current user and not world-writable before execution
+- **Input validation** - Added protection against absolute paths, git flag injection, reserved git references, and malformed paths
+
+**Other improvements:**
+- **Database name limits** - Names exceeding MySQL's 64-character limit are automatically truncated with a hash suffix
+- **Fresh command safety** - `wt fresh` now requires confirmation before running `migrate:fresh` (use `-f` to skip)
+- **Remote branch fetching** - `origin/...` base branches are now explicitly fetched to ensure the latest version is used
 
 ### What's New in 3.5.0
 
