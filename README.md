@@ -1,23 +1,6 @@
 # wt - Git Worktree Manager for Laravel Herd
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
-[![Laravel Herd](https://img.shields.io/badge/Laravel%20Herd-FF2D20?logo=laravel&logoColor=white)](https://herd.laravel.com/)
-
-A command-line tool for managing Git worktrees with Laravel Herd integration. Work on multiple branches simultaneously without stashing or switching.
-
-**Perfect for:** Laravel developers who work on multiple features/bugs in parallel and want each branch to have its own isolated environment with automatic database setup, HTTPS, and Herd integration.
-
-## Features
-
-- **Parallel Development** - Work on multiple branches simultaneously, each with its own URL
-- **Automatic Environment Setup** - Creates `.env`, runs `composer install`, generates app key
-- **Database Per Worktree** - Auto-creates MySQL databases, backs up on removal
-- **Laravel Herd Integration** - HTTPS via `herd secure`, `.test` domains
-- **Interactive Selection** - fzf-powered branch picking
-- **Claude Code Integration** - Isolated AI sessions per worktree
-- **macOS Notifications** - Get notified when long operations complete
-- **Customisable Hooks** - Run your own scripts after worktree creation
+A command-line tool for managing git worktrees with Laravel Herd integration. Work on multiple branches simultaneously without stashing or switching.
 
 ## What are Git Worktrees?
 
@@ -44,8 +27,8 @@ This is the most important thing to understand about worktrees. If you break thi
 ### ❌ DON'T: Switch branches inside a worktree
 
 ```bash
-# You're in myapp--feature-login worktree
-cd ~/Herd/myapp--feature-login
+# You're in scooda--feature-login worktree
+cd ~/Herd/scooda--feature-login
 
 # DON'T DO THIS:
 git checkout staging                    # ❌ Wrong!
@@ -56,7 +39,7 @@ git switch main                         # ❌ Wrong!
 **Also avoid switching branches via GUI tools** (GitKraken, SourceTree, VS Code Git panel, etc.) when you have a worktree open. The GUI doesn't know about the worktree naming convention.
 
 **Why this breaks things:**
-- The directory `myapp--feature-login` now contains the `staging` branch
+- The directory `scooda--feature-login` now contains the `staging` branch
 - The directory name is now misleading
 - `wt` commands may behave unexpectedly
 - You might accidentally commit to the wrong branch
@@ -66,15 +49,15 @@ git switch main                         # ❌ Wrong!
 
 ```bash
 # Want to work on a different branch? Create/switch to its worktree:
-cd "$(wt switch myapp)"                 # Pick with fzf
-cd "$(wt switch myapp staging)"         # Go to staging worktree
-cd "$(wt cd myapp feature/payments)"    # Navigate to specific worktree
+cd "$(wt switch scooda)"                # Pick with fzf
+cd "$(wt switch scooda staging)"        # Go to staging worktree
+cd "$(wt cd scooda feature/payments)"   # Navigate to specific worktree
 
 # Need a worktree for a new branch? Create one:
-wt add myapp feature/new-thing
+wt add scooda feature/new-thing
 
 # Done with a branch? Remove its worktree:
-wt rm myapp feature/old-thing
+wt rm scooda feature/old-thing
 ```
 
 ### ✅ DO: Use git commands that don't change the checked-out branch
@@ -91,13 +74,13 @@ git log / git diff                      # ✅ View history
 git rebase origin/staging               # ✅ Rebase (or use: wt sync)
 git merge --no-ff feature/x             # ✅ Merge another branch in
 git cherry-pick abc123                  # ✅ Cherry-pick commits
-git show other-branch:file.php          # ✅ View file from another branch
+git show other-branch:file.php         # ✅ View file from another branch
 git diff staging..HEAD                  # ✅ Compare branches
 ```
 
 ### What about the staging worktree?
 
-The staging worktree (`myapp--staging`) should **always** have the `staging` branch checked out. The same rules apply:
+The staging worktree (`scooda--staging`) should **always** have the `staging` branch checked out. The same rules apply:
 
 ```bash
 # In the staging worktree, you can:
@@ -117,9 +100,9 @@ Think of each worktree directory as a **dedicated workspace** for one branch:
 
 | Directory | Branch | Purpose |
 |-----------|--------|---------|
-| `myapp--staging` | `staging` | Integration testing, merges |
-| `myapp--feature-login` | `feature/login` | Login feature development |
-| `myapp--bugfix-cart` | `bugfix/cart` | Cart bug fix |
+| `scooda--staging` | `staging` | Integration testing, merges |
+| `scooda--feature-login` | `feature/login` | Login feature development |
+| `scooda--bugfix-cart` | `bugfix/cart` | Cart bug fix |
 
 You don't "switch branches" - you **switch worktrees**. Each branch has its own directory, its own editor window, its own browser tab, its own database.
 
@@ -129,9 +112,9 @@ If you've already run `git checkout` inside a worktree, `wt status` and `wt ls` 
 
 ```text
 ⚠ Branch/Directory Mismatches Detected:
-  myapp--feature-login
+  scooda--feature-login
     Current branch:  staging
-    Expected dir:    myapp--staging
+    Expected dir:    scooda--staging
     Fix: Checkout correct branch or recreate worktree
 ```
 
@@ -139,72 +122,30 @@ If you've already run `git checkout` inside a worktree, `wt status` and `wt ls` 
 
 ```bash
 # Option 1: Checkout the correct branch back
-cd ~/Herd/myapp--feature-login
+cd ~/Herd/scooda--feature-login
 git checkout feature/login              # Put the right branch back
 
 # Option 2: If you've made commits on the wrong branch,
 #           you may need to cherry-pick or reset
 ```
 
-## Requirements
-
-| Requirement | Status | Notes |
-|-------------|--------|-------|
-| macOS | Required | Uses Herd and osascript |
-| zsh | Required | Script is zsh-specific |
-| Git 2.5+ | Required | Worktree support |
-| [Laravel Herd](https://herd.laravel.com/) | Required | Site management |
-| Composer | Required | Laravel dependency management |
-| MySQL | Optional | Auto-creates databases per worktree |
-| [fzf](https://github.com/junegunn/fzf) | Optional | Interactive branch selection |
-
 ## Installation
 
-### Quick Install (Recommended)
+### 1. Install the script
+
+The script is already at `~/bin/wt`. Make sure it's executable:
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/wt-worktree-manager.git
-cd wt-worktree-manager
-
-# Run the installer
-chmod +x install.sh
-./install.sh
+chmod +x ~/bin/wt
 ```
 
-The installer will:
-1. Check requirements
-2. Install `wt` to `/usr/local/bin/`
-3. Install zsh completions
-4. Create a config file at `~/.wtrc`
-
-### Manual Installation
+Ensure `~/bin` is in your PATH. Add to `~/.zshrc` if needed:
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/wt-worktree-manager.git
-cd wt-worktree-manager
-
-# Copy the script
-sudo cp wt /usr/local/bin/wt
-sudo chmod +x /usr/local/bin/wt
-
-# Set up completions
-mkdir -p ~/.zsh/completions
-cp _wt ~/.zsh/completions/
-
-# Add to ~/.zshrc
-echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
-echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
-
-# Create config
-cp .wtrc.example ~/.wtrc
-
-# Reload shell
-source ~/.zshrc
+export PATH="$HOME/bin:$PATH"
 ```
 
-### Install fzf (Recommended)
+### 2. Install fzf (optional but recommended)
 
 fzf enables interactive branch selection:
 
@@ -212,28 +153,31 @@ fzf enables interactive branch selection:
 brew install fzf
 ```
 
-### Verify Installation
+### 3. Set up autocompletion
+
+Copy the completion script and configure zsh:
 
 ```bash
-wt --version
-wt doctor
+# Create completions directory
+mkdir -p ~/.zsh/completions
+
+# Copy the completion script
+cp ~/bin/_wt ~/.zsh/completions/
+
+# Add to ~/.zshrc (if not already there):
+echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
+echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
+
+# Reload shell
+source ~/.zshrc
 ```
 
-### Tab Completion
-
-After installation, you can use Tab to complete commands, repos, and branches:
+Now you can use Tab to complete commands, repos, and branches:
 
 ```bash
-wt pu<Tab>             # completes to 'pull' or 'pull-all'
-wt pull my<Tab>        # completes to 'myapp'
-wt pull myapp f<Tab>   # completes to available branches
-```
-
-### Uninstall
-
-```bash
-cd wt-worktree-manager
-./uninstall.sh
+wt pu<Tab>        # completes to 'pull' or 'pull-all'
+wt pull sc<Tab>   # completes to 'scooda'
+wt pull scooda f<Tab>  # completes to available branches
 ```
 
 ## Configuration
@@ -278,7 +222,6 @@ These can be set in your shell or config file:
 | `WT_BASE_DEFAULT` | `origin/staging` | Default branch for new worktrees |
 | `WT_EDITOR` | `cursor` | Editor for `wt code` command |
 | `WT_CONFIG` | `~/.wtrc` | Path to config file |
-| `WT_HOOKS_DIR` | `~/.wt/hooks` | Directory containing hook scripts |
 | `WT_DB_HOST` | `127.0.0.1` | MySQL host for database operations |
 | `WT_DB_USER` | `root` | MySQL user for database operations |
 | `WT_DB_PASSWORD` | (empty) | MySQL password for database operations |
@@ -286,109 +229,6 @@ These can be set in your shell or config file:
 | `WT_DB_BACKUP` | `true` | Backup database on `wt rm` |
 | `WT_DB_BACKUP_DIR` | `~/Code/Project Support/Worktree/Database/Backup` | Backup directory |
 | `WT_PROTECTED_BRANCHES` | `staging main master` | Space-separated list of protected branches |
-
-### Hooks
-
-Hooks allow you to run custom scripts after certain wt operations. This is useful for automating setup steps specific to your workflow.
-
-#### Available hooks
-
-| Hook | Trigger | Description |
-|------|---------|-------------|
-| `post-add` | After `wt add` | Runs after worktree creation completes |
-
-#### Creating a hook
-
-1. Create the hooks directory:
-   ```bash
-   mkdir -p ~/.wt/hooks
-   ```
-
-2. Create an executable script with the hook name:
-   ```bash
-   # ~/.wt/hooks/post-add
-   #!/bin/bash
-
-   # Run npm install and build assets
-   npm ci
-   npm run build
-
-   # Run database migrations
-   php artisan migrate
-
-   # Clear caches
-   php artisan config:clear
-   php artisan route:clear
-   ```
-
-3. Make it executable:
-   ```bash
-   chmod +x ~/.wt/hooks/post-add
-   ```
-
-#### Environment variables in hooks
-
-Hooks receive context about the worktree via environment variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `WT_REPO` | Repository name | `myapp` |
-| `WT_BRANCH` | Branch name | `feature/login` |
-| `WT_PATH` | Worktree path | `/Users/you/Herd/myapp--feature-login` |
-| `WT_URL` | Application URL | `https://myapp--feature-login.test` |
-| `WT_DB_NAME` | Database name | `myapp__feature_login` |
-| `WT_HOOK_NAME` | Current hook name | `post-add` |
-
-#### Example: Conditional hook
-
-```bash
-#!/bin/bash
-# ~/.wt/hooks/post-add
-
-# Only run npm for repos that have package.json
-if [[ -f "package.json" ]]; then
-  npm ci
-  npm run build
-fi
-
-# Only run migrations for Laravel projects
-if [[ -f "artisan" ]]; then
-  php artisan migrate
-fi
-
-# Log the creation
-echo "$(date): Created $WT_REPO / $WT_BRANCH" >> ~/.wt/worktree.log
-```
-
-#### Multiple hooks
-
-For complex setups, create a `.d` directory with numbered scripts:
-
-```text
-~/.wt/hooks/
-├── post-add              # Single hook (runs first if exists)
-└── post-add.d/           # Multiple hooks (run in order)
-    ├── 01-npm.sh
-    ├── 02-migrate.sh
-    └── 03-notify.sh
-```
-
-All executable scripts in the `.d` directory run in alphabetical order.
-
-#### Verify hooks with doctor
-
-Check your hooks configuration:
-
-```bash
-wt doctor
-```
-
-Output includes:
-```text
-Hooks
-✔ Hooks directory: /Users/you/.wt/hooks
-✔   post-add: enabled
-```
 
 ## Getting Started
 
@@ -588,15 +428,16 @@ wt add myapp feature/new-work origin/main
 **What it does automatically:**
 
 1. Fetches all branches from remote
-2. Creates the worktree directory at `~/Herd/<repo>--<branch-slug>/`
-3. Pushes new branch to remote and sets correct tracking (prevents accidental pushes to wrong branch)
-4. Copies `.env.example` to `.env` (if exists)
-5. Sets `APP_URL` in `.env` to `https://<repo>--<branch-slug>.test`
-6. Creates a MySQL database named `<repo>__<branch_slug>` (underscores for MySQL compatibility)
-7. Sets `DB_DATABASE` in `.env` to the new database name
-8. Secures the site with HTTPS via `herd secure`
-9. Runs `composer install`
-10. Generates Laravel app key
+2. If using `origin/...` as base, explicitly fetches that branch with `--force` to ensure it's up-to-date
+3. Creates the worktree directory at `~/Herd/<repo>--<branch-slug>/`
+4. **Pushes new branch to remote and sets up tracking** (prevents accidental pushes to wrong branch)
+5. Copies `.env.example` to `.env` (if exists)
+6. Sets `APP_URL` in `.env` to `https://<repo>--<branch-slug>.test`
+7. Creates a MySQL database named `<repo>__<branch_slug>` (underscores for MySQL compatibility)
+8. Sets `DB_DATABASE` in `.env` to the new database name
+9. Secures the site with HTTPS via `herd secure`
+10. Runs `composer install`
+11. Generates Laravel app key
 
 **Database naming:** Branch slashes become underscores, dashes become underscores:
 - `myapp` + `feature/login` → `myapp__feature_login`
@@ -754,28 +595,24 @@ Output:
     url     🌐 https://myapp--feature-login.test
     cd      cd '/Users/you/Herd/myapp--feature-login'
 
-[3] 📁 /Users/you/Herd/myapp--old-feature-name
-    branch  🌿 feature/new-name
-    ⚠️  MISMATCH: Directory suggests 'old-feature-name' but branch is 'feature/new-name'
-    sha     i7j8k9l
+[3] 📁 /Users/you/Herd/myapp--old-name
+    branch  🌿 feature/renamed-branch
+    sha     m1n2o3p
     state   ● clean
-    sync    ↑0 ↓0
-    url     🌐 https://myapp--old-feature-name.test
-    cd      cd '/Users/you/Herd/myapp--old-feature-name'
+    url     🌐 https://myapp--old-name.test
+    cd      cd '/Users/you/Herd/myapp--old-name'
+    ⚠ MISMATCH Directory name doesn't match branch!
+      Expected: myapp--feature-renamed-branch
 ```
 
-- **Mismatch warning**: Shown inline when a worktree's directory name doesn't match its checked-out branch (e.g., if someone ran `git checkout` inside the worktree instead of using `wt add`)
+**Mismatch warnings**: If someone runs `git checkout` inside a worktree, the directory name no longer matches the branch. This warning helps catch these issues.
 
 **JSON output:**
 ```bash
 wt ls --json myapp
 ```
 ```json
-[
-  {"path": "/Users/you/Herd/myapp--staging", "branch": "staging", "sha": "a1b2c3d", "url": "https://myapp--staging.test", "dirty": false, "ahead": 0, "behind": 0, "mismatch": false},
-  {"path": "/Users/you/Herd/myapp--feature-login", "branch": "feature/login", "sha": "e4f5g6h", "url": "https://myapp--feature-login.test", "dirty": true, "ahead": 5, "behind": 12, "mismatch": false},
-  {"path": "/Users/you/Herd/myapp--old-feature-name", "branch": "feature/new-name", "sha": "i7j8k9l", "url": "https://myapp--old-feature-name.test", "dirty": false, "ahead": 0, "behind": 0, "mismatch": true}
-]
+[{"path": "/Users/you/Herd/myapp--staging", "branch": "staging", "sha": "a1b2c3d", "url": "https://myapp--staging.test", "dirty": false, "ahead": 0, "behind": 0, "mismatch": false}]
 ```
 
 #### The `sync` command in detail
@@ -1278,9 +1115,13 @@ MySQL database names are limited to 64 characters. If your repo + branch name ex
 
 ## Version
 
-Current version: **3.3.0**
+Current version: **3.5.0**
 
 Check with: `wt --version`
+
+### What's New in 3.5.0
+
+- **Improved remote branch fetching** - When using `origin/...` as a base branch, `wt add` now explicitly fetches the latest version with `--force`. This ensures branches with slashes (e.g., `origin/proj-jl/rethink`) are always up-to-date, even if they weren't properly tracked locally.
 
 ### What's New in 3.3.0
 

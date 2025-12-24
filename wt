@@ -679,6 +679,14 @@ cmd_add() {
   info "Fetching latest branches..."
   git --git-dir="$git_dir" fetch --all --prune --quiet
 
+  # If base is a remote ref (origin/...), explicitly fetch it to ensure we have the latest
+  # This handles branches with slashes and ensures the tracking ref is up-to-date
+  if [[ "$base" == origin/* ]]; then
+    local remote_branch="${base#origin/}"
+    dim "  Fetching latest: $remote_branch"
+    git --git-dir="$git_dir" fetch origin "$remote_branch:refs/remotes/origin/$remote_branch" --force 2>/dev/null || true
+  fi
+
   [[ ! -d "$wt_path" ]] || die "Worktree already exists at ${C_CYAN}$wt_path${C_RESET}"
 
   # Verify base branch exists when creating new branch
