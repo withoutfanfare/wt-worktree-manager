@@ -8,7 +8,10 @@
       "Bash(zsh -c 'setopt extendedglob; cd ~/.wt/hooks && for f in post-add.d/*\\(.x\\)\\(N\\); do echo \"\"Found: $f\"\"; done')",
       "Bash(zsh:*)",
       "Bash(xattr:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(./run-tests.sh:*)",
+      "Bash(bats:*)",
+      "Bash(HERD_ROOT=\"/tmp/test-herd\" WT_TEMPLATES_DIR=\"/tmp/test-templates\" NO_COLOR=1 zsh:*)"
     ]
   }
 }

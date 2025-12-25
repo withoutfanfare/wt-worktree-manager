@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.7.0"
+readonly VERSION="3.9.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
@@ -23,10 +23,18 @@ DB_BACKUP="${WT_DB_BACKUP:-true}"
 # Hooks directory (for custom post-add scripts, etc.)
 WT_HOOKS_DIR="${WT_HOOKS_DIR:-$HOME/.wt/hooks}"
 
+# Templates directory (for worktree setup templates)
+WT_TEMPLATES_DIR="${WT_TEMPLATES_DIR:-$HOME/.wt/templates}"
+
+# Active template (set via --template flag)
+WT_TEMPLATE=""
+
 # Global flags
 QUIET=false
 FORCE=false
 JSON_OUTPUT=false
+PRETTY_JSON=false
+DRY_RUN=false
 DELETE_BRANCH=false
 DROP_DB=false
 NO_BACKUP=false
@@ -75,6 +83,7 @@ load_config() {
         DB_BACKUP_DIR) DB_BACKUP_DIR="$value" ;;
         DB_BACKUP) DB_BACKUP="$value" ;;
         WT_HOOKS_DIR) WT_HOOKS_DIR="$value" ;;
+        WT_TEMPLATES_DIR) WT_TEMPLATES_DIR="$value" ;;
         PROTECTED_BRANCHES) PROTECTED_BRANCHES="$value" ;;
       esac
     done < "$file"
@@ -185,22 +194,41 @@ validate_config() {
   return $warnings
 }
 
+# Common validation helper for identifiers (repos, branches, templates)
+# Usage: validate_identifier <value> <type> <allowed_chars_regex> [extra_checks]
+# Returns 0 on success, calls die on failure
+validate_identifier_common() {
+  local input="$1" type="$2"
+
+  # Block empty or whitespace-only
+  if [[ -z "$input" || "$input" =~ ^[[:space:]]*$ ]]; then
+    die "Invalid $type: name cannot be empty"
+  fi
+
+  # Block path traversal
+  if [[ "$input" == *".."* ]]; then
+    die "Invalid $type: '$input' (path traversal not allowed)"
+  fi
+
+  # Block names starting with dash (flag injection)
+  if [[ "$input" == -* ]]; then
+    die "Invalid $type: '$input' (cannot start with dash)"
+  fi
+}
+
 validate_name() {
   local input="$1" type="$2"
+
+  validate_identifier_common "$input" "$type"
 
   # Block absolute paths
   if [[ "$input" == /* ]]; then
     die "Invalid $type name: '$input' (absolute paths not allowed)"
   fi
 
-  # Block path traversal in various forms
-  if [[ "$input" == *".."* || "$input" == *"/."* || "$input" == *"/./"* ]]; then
+  # Block hidden path segments
+  if [[ "$input" == *"/."* || "$input" == *"/./"* ]]; then
     die "Invalid $type name: '$input' (path traversal not allowed)"
-  fi
-
-  # Block branches starting with dash (git flag injection)
-  if [[ "$input" == -* ]]; then
-    die "Invalid $type name: '$input' (cannot start with dash)"
   fi
 
   # Block reserved git references
@@ -678,14 +706,299 @@ check_stale() {
   return 1
 }
 
+# Get human-readable age of last commit
+# Returns: "1d", "2w", "3mo", "1y" etc.
+get_last_commit_age() {
+  local wt_path="$1"
+  local now epoch_seconds age_seconds age_days
+
+  now="$(date +%s)"
+  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "?"; return 0; }
+
+  # Handle future timestamps (clock skew, timezone issues)
+  if (( epoch_seconds > now )); then
+    print -r -- "<1h"
+    return 0
+  fi
+
+  (( age_seconds = now - epoch_seconds ))
+  (( age_days = age_seconds / 86400 ))
+
+  if (( age_days == 0 )); then
+    local hours=$(( age_seconds / 3600 ))
+    if (( hours == 0 )); then
+      print -r -- "<1h"
+    else
+      print -r -- "${hours}h"
+    fi
+  elif (( age_days < 7 )); then
+    print -r -- "${age_days}d"
+  elif (( age_days < 30 )); then
+    print -r -- "$(( age_days / 7 ))w"
+  elif (( age_days < 365 )); then
+    print -r -- "$(( age_days / 30 ))mo"
+  else
+    print -r -- "$(( age_days / 365 ))y"
+  fi
+}
+
+# Get age in days (for threshold comparison)
+get_commit_age_days() {
+  local wt_path="$1"
+  local now epoch_seconds age_seconds
+
+  now="$(date +%s)"
+  epoch_seconds="$(git -C "$wt_path" log -1 --format=%ct 2>/dev/null)" || { print -r -- "0"; return 0; }
+
+  # Handle future timestamps (clock skew, timezone issues)
+  if (( epoch_seconds > now )); then
+    print -r -- "0"
+    return 0
+  fi
+
+  (( age_seconds = now - epoch_seconds ))
+  print -r -- "$(( age_seconds / 86400 ))"
+}
+
+# Check if branch is fully merged into base
+is_branch_merged() {
+  local wt_path="$1" base="${2:-origin/staging}"
+  local branch_head base_head
+
+  branch_head="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)" || return 1
+
+  # Check if the base branch contains this commit
+  if git -C "$wt_path" merge-base --is-ancestor "$branch_head" "$base" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# Validate template name (security: prevent path traversal)
+validate_template_name() {
+  local name="$1"
+
+  validate_identifier_common "$name" "template"
+
+  # Block slashes and backslashes (templates are single files, no paths)
+  if [[ "$name" == *"/"* || "$name" == *"\\"* ]]; then
+    die "Invalid template name: '$name' (path separators not allowed)"
+  fi
+
+  # Only allow alphanumeric, dash, underscore (stricter than repo/branch names)
+  if [[ ! "$name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    die "Invalid template name: '$name' (only alphanumeric, dash, underscore allowed)"
+  fi
+}
+
+# Load a template file and export its WT_SKIP_* variables
+# Template format: key=value (like .wtrc)
+# Find similar names for "did you mean?" suggestions
+# Usage: suggest_similar <input> <type> <list_of_options>
+# Returns the closest match or empty string
+suggest_similar() {
+  local input="$1" type="$2"
+  shift 2
+  local options=("$@")
+  local best_match="" best_score=999
+
+  for opt in "${options[@]}"; do
+    # Simple similarity: count matching characters at start
+    local i=0 score=0
+    local input_lower="${input:l}" opt_lower="${opt:l}"
+
+    # Check if input is a prefix
+    if [[ "$opt_lower" == "$input_lower"* ]]; then
+      score=$((${#opt} - ${#input}))
+      if (( score < best_score )); then
+        best_score=$score
+        best_match="$opt"
+      fi
+      continue
+    fi
+
+    # Check if input is a substring
+    if [[ "$opt_lower" == *"$input_lower"* ]]; then
+      score=$((${#opt} - ${#input} + 5))
+      if (( score < best_score )); then
+        best_score=$score
+        best_match="$opt"
+      fi
+      continue
+    fi
+
+    # Levenshtein-like: count character differences (simplified)
+    local len1=${#input_lower} len2=${#opt_lower}
+    local max_len=$(( len1 > len2 ? len1 : len2 ))
+    local matching=0
+    for (( i=0; i < max_len; i++ )); do
+      [[ "${input_lower:$i:1}" == "${opt_lower:$i:1}" ]] && ((matching++))
+    done
+    score=$((max_len - matching))
+    if (( score < best_score && score < max_len / 2 )); then
+      best_score=$score
+      best_match="$opt"
+    fi
+  done
+
+  # Only suggest if reasonably close (within half the length)
+  if [[ -n "$best_match" && $best_score -lt ${#input} ]]; then
+    print -r -- "$best_match"
+  fi
+}
+
+# Get list of available template names
+get_template_names() {
+  local templates=()
+  if [[ -d "$WT_TEMPLATES_DIR" ]]; then
+    for f in "$WT_TEMPLATES_DIR"/*.conf(N); do
+      templates+=("${f:t:r}")
+    done
+  fi
+  print -r -- "${templates[@]}"
+}
+
+load_template() {
+  local template_name="$1"
+
+  # Validate template name first (security: prevent path traversal)
+  validate_template_name "$template_name"
+
+  local template_file="$WT_TEMPLATES_DIR/${template_name}.conf"
+
+  # Check if template exists
+  if [[ ! -f "$template_file" ]]; then
+    local available_templates
+    available_templates=($(get_template_names))
+
+    local suggestion=""
+    if (( ${#available_templates[@]} > 0 )); then
+      suggestion="$(suggest_similar "$template_name" "template" "${available_templates[@]}")"
+    fi
+
+    local error_msg="Template not found: ${C_CYAN}$template_name${C_RESET}"
+    if [[ -n "$suggestion" ]]; then
+      error_msg+="\n\n  ${C_YELLOW}Did you mean:${C_RESET} ${C_GREEN}$suggestion${C_RESET}?"
+    fi
+    error_msg+="\n\n${C_DIM}Available templates:${C_RESET}\n$(list_templates 2>&1)"
+    error_msg+="\n\n${C_DIM}Run 'wt templates' to see all templates${C_RESET}"
+
+    die "$error_msg"
+  fi
+
+  # Parse template file (only allow WT_SKIP_* and TEMPLATE_DESC)
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    # Skip comments and empty lines
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*$ ]] && continue
+
+    # Trim whitespace from key
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+
+    # Remove quotes and trailing comments from value
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    value="${value%%#*}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    # Only allow WT_SKIP_* variables with true/false values (security)
+    case "$key" in
+      WT_SKIP_*)
+        # Security: Only allow true/false values to prevent command injection
+        if [[ "$value" != "true" && "$value" != "false" ]]; then
+          warn "Invalid value for $key: '$value' (must be true or false) - skipping"
+          continue
+        fi
+        export "$key"="$value"
+        ;;
+      TEMPLATE_DESC) ;; # Ignore, used for display only
+      *) ;; # Ignore other variables (security)
+    esac
+  done < "$template_file"
+
+  dim "  📋 Applied template: $template_name"
+}
+
+# List available templates
+list_templates() {
+  local templates_found=false
+
+  if [[ -d "$WT_TEMPLATES_DIR" ]]; then
+    for f in "$WT_TEMPLATES_DIR"/*.conf(N); do
+      templates_found=true
+      local name="${f:t:r}"  # Remove path and .conf extension
+      local desc=""
+
+      # Extract TEMPLATE_DESC if present
+      desc="$(grep '^TEMPLATE_DESC=' "$f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'")"
+
+      if [[ -n "$desc" ]]; then
+        print -r -- "  $name - $desc"
+      else
+        print -r -- "  $name"
+      fi
+    done
+  fi
+
+  if [[ "$templates_found" != true ]]; then
+    print -r -- "  (no templates found)"
+    print -r -- ""
+    print -r -- "  Create templates in: $WT_TEMPLATES_DIR/"
+    print -r -- "  Example: $WT_TEMPLATES_DIR/laravel.conf"
+  fi
+}
+
 # JSON helper
 json_escape() {
   local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  s="${s//$'\n'/\\n}"
-  s="${s//$'\t'/\\t}"
+  s="${s//\\/\\\\}"       # Backslash must be first
+  s="${s//\"/\\\"}"       # Double quote
+  s="${s//$'\n'/\\n}"     # Newline
+  s="${s//$'\t'/\\t}"     # Tab
+  s="${s//$'\r'/\\r}"     # Carriage return
+  s="${s//$'\f'/\\f}"     # Form feed
+  s="${s//$'\b'/\\b}"     # Backspace
   print -r -- "$s"
+}
+
+# Pretty-print JSON with colours and indentation
+# Usage: format_json "$json_string"
+format_json() {
+  local json="$1"
+
+  if [[ "$PRETTY_JSON" != true ]]; then
+    print -r -- "$json"
+    return
+  fi
+
+  # Use sed for basic pretty-printing with colour codes
+  # Keys in cyan, strings in green, numbers in yellow, booleans in magenta, brackets in white
+  local result="$json"
+
+  # Add newlines and indentation
+  result="${result//\[/$'\n['}"
+  result="${result//\{/$'\n  {'}"
+  result="${result//\}/$'}\n'}"
+  result="${result//\],/$'],\n'}"
+  result="${result//\}, /'},\n  '}"
+
+  # Apply colours if terminal supports it
+  if [[ -t 1 ]]; then
+    # Colour keys (words before colons)
+    result="$(print -r -- "$result" | sed -E "s/\"([^\"]+)\":/\"${C_CYAN}\1${C_RESET}\":/g")"
+    # Colour string values
+    result="$(print -r -- "$result" | sed -E "s/: \"([^\"]*)\"/: \"${C_GREEN}\1${C_RESET}\"/g")"
+    # Colour booleans
+    result="${result//: true/: ${C_MAGENTA}true${C_RESET}}"
+    result="${result//: false/: ${C_MAGENTA}false${C_RESET}}"
+    # Colour numbers (simple approach)
+    result="$(print -r -- "$result" | sed -E "s/: ([0-9]+)([,}])/: ${C_YELLOW}\1${C_RESET}\2/g")"
+  fi
+
+  print -r -- "$result"
 }
 
 # Verify hook file is safe to execute (owned by current user, not world-writable)
@@ -847,12 +1160,55 @@ cmd_add() {
   # Load repo-specific config (may override DEFAULT_BASE)
   load_repo_config "$git_dir"
 
+  # Load template if specified (sets WT_SKIP_* environment variables)
+  if [[ -n "$WT_TEMPLATE" ]]; then
+    load_template "$WT_TEMPLATE"
+  fi
+
   # Use provided base or default
   [[ -z "$base" ]] && base="$DEFAULT_BASE"
 
   local wt_path; wt_path="$(wt_path_for "$repo" "$branch")"
   local app_url; app_url="$(url_for "$repo" "$branch")"
   local db_name; db_name="$(db_name_for "$repo" "$branch")"
+
+  # Dry-run mode - show what would happen without executing
+  if [[ "$DRY_RUN" == true ]]; then
+    print -r -- ""
+    print -r -- "${C_BOLD}🔍 Dry Run Preview${C_RESET}"
+    print -r -- ""
+    print -r -- "${C_BOLD}Worktree Details:${C_RESET}"
+    print -r -- "  Repository:  ${C_CYAN}$repo${C_RESET}"
+    print -r -- "  Branch:      ${C_MAGENTA}$branch${C_RESET}"
+    print -r -- "  Base:        ${C_DIM}$base${C_RESET}"
+    print -r -- "  Path:        $wt_path"
+    print -r -- "  URL:         ${C_CYAN}$app_url${C_RESET}"
+    print -r -- "  Database:    ${C_CYAN}$db_name${C_RESET}"
+    print -r -- ""
+    if [[ -n "$WT_TEMPLATE" ]]; then
+      print -r -- "${C_BOLD}Template:${C_RESET} $WT_TEMPLATE"
+      print -r -- "  ${C_DIM}WT_SKIP_DB${C_RESET}=${WT_SKIP_DB:-false}"
+      print -r -- "  ${C_DIM}WT_SKIP_COMPOSER${C_RESET}=${WT_SKIP_COMPOSER:-false}"
+      print -r -- "  ${C_DIM}WT_SKIP_NPM${C_RESET}=${WT_SKIP_NPM:-false}"
+      print -r -- "  ${C_DIM}WT_SKIP_BUILD${C_RESET}=${WT_SKIP_BUILD:-false}"
+      print -r -- "  ${C_DIM}WT_SKIP_MIGRATE${C_RESET}=${WT_SKIP_MIGRATE:-false}"
+      print -r -- "  ${C_DIM}WT_SKIP_HERD${C_RESET}=${WT_SKIP_HERD:-false}"
+      print -r -- ""
+    fi
+    print -r -- "${C_BOLD}Actions:${C_RESET}"
+    print -r -- "  1. Fetch latest branches from remote"
+    if git --git-dir="$git_dir" show-ref --quiet "refs/heads/$branch" 2>/dev/null; then
+      print -r -- "  2. Create worktree from existing branch: $branch"
+    else
+      print -r -- "  2. Create new branch '$branch' from '$base'"
+      print -r -- "  3. Push branch to remote and set up tracking"
+    fi
+    print -r -- "  4. Run pre-add hooks"
+    print -r -- "  5. Run post-add hooks (environment setup)"
+    print -r -- ""
+    print -r -- "${C_DIM}Run without --dry-run to execute${C_RESET}"
+    return 0
+  fi
 
   info "Fetching latest branches..."
   git --git-dir="$git_dir" fetch --all --prune --quiet
@@ -1091,12 +1447,15 @@ cmd_ls() {
   fi
 
   if [[ "$JSON_OUTPUT" == true ]]; then
-    print -r -- "[${(j:, :)json_items}]"
+    format_json "[${(j:, :)json_items}]"
   fi
 }
 
 cmd_status() {
   local repo="${1:-}"
+  local stale_threshold=50
+  local inactive_days=30
+
   [[ -n "$repo" ]] || die "Usage: wt status <repo>"
 
   validate_name "$repo" "repository"
@@ -1112,44 +1471,100 @@ cmd_status() {
   out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
   [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
 
-  print -r -- ""
-  print -r -- "${C_BOLD}📊 Worktree Status: ${C_CYAN}$repo${C_RESET}"
-  print -r -- ""
-  printf "  ${C_DIM}%-30s %-12s %-10s %-15s${C_RESET}\n" "BRANCH" "STATE" "SYNC" "SHA"
-  print -r -- "  ${C_DIM}──────────────────────────────────────────────────────────────────────${C_RESET}"
+  # JSON output mode
+  local json_items=()
+
+  if [[ "$JSON_OUTPUT" != true ]]; then
+    print -r -- ""
+    print -r -- "${C_BOLD}📊 Worktree Status: ${C_CYAN}$repo${C_RESET}"
+    print -r -- ""
+    printf "  ${C_DIM}%-28s %-10s %-14s %-6s %-7s %-10s${C_RESET}\n" "BRANCH" "STATE" "SYNC" "AGE" "MERGED" "SHA"
+    print -r -- "  ${C_DIM}───────────────────────────────────────────────────────────────────────────────────${C_RESET}"
+  fi
 
   local path="" branch="" head="" line=""
   local sha st state_icon state_color changes counts ahead behind
+  local age age_days merged_icon sync_display is_stale is_inactive
   local mismatches=()
+
+  # Helper to display a worktree row
+  display_status_row() {
+    local p="$1" b="$2"
+
+    sha="$(git -C "$p" rev-parse --short HEAD 2>/dev/null)" || sha="?"
+    st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
+    state_icon="●"
+    state_color="$C_GREEN"
+    is_stale=false
+    is_inactive=false
+
+    if [[ -n "$st" ]]; then
+      changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
+      state_icon="◐ $changes"
+      state_color="$C_YELLOW"
+    fi
+
+    # Check for mismatch
+    local match_result="$(check_branch_directory_match "$p" "$b" "$repo")"
+    if [[ "$match_result" == mismatch\|* ]]; then
+      local expected_slug="${match_result#mismatch|}"
+      mismatches+=("${p:t}|$b|$expected_slug")
+    fi
+
+    # Get sync status
+    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
+    ahead="${counts%% *}"
+    behind="${counts##* }"
+
+    # Check if stale (>50 commits behind)
+    if (( behind > stale_threshold )); then
+      is_stale=true
+      sync_display="${C_RED}↑$ahead ↓$behind 🔴${C_RESET}"
+    else
+      sync_display="↑$ahead ↓$behind"
+    fi
+
+    # Get age
+    age="$(get_last_commit_age "$p")"
+    age_days="$(get_commit_age_days "$p")"
+    if (( age_days > inactive_days )); then
+      is_inactive=true
+    fi
+
+    # Check if merged
+    if is_branch_merged "$p" "$DEFAULT_BASE"; then
+      merged_icon="${C_DIM}✓${C_RESET}"
+    else
+      merged_icon="${C_DIM}-${C_RESET}"
+    fi
+
+    # Apply row colouring for stale/inactive
+    local branch_display="${b:0:26}"
+    local age_display="$age"
+    if [[ "$is_stale" == true ]]; then
+      branch_display="${C_RED}${b:0:26}${C_RESET}"
+      state_color="$C_RED"
+    elif [[ "$is_inactive" == true ]]; then
+      age_display="${C_YELLOW}$age${C_RESET}"
+    fi
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      local dirty=false
+      [[ -n "$st" ]] && dirty=true
+      local merged=false
+      is_branch_merged "$p" "$DEFAULT_BASE" && merged=true
+      json_items+=("{\"branch\": \"$(json_escape "$b")\", \"path\": \"$(json_escape "$p")\", \"sha\": \"$(json_escape "$sha")\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead, \"behind\": $behind, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}")
+    else
+      printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
+        "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
+    fi
+  }
 
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       # Skip bare repo entry (no branch) and process worktrees
       if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-        sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null)" || sha="?"
-        st="$(git -C "$path" status --porcelain 2>/dev/null)" || st=""
-        state_icon="●"
-        state_color="$C_GREEN"
-
-        if [[ -n "$st" ]]; then
-          changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
-          state_icon="◐ $changes"
-          state_color="$C_YELLOW"
-        fi
-
-        # Check for mismatch
-        local match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
-        if [[ "$match_result" == mismatch\|* ]]; then
-          local expected_slug="${match_result#mismatch|}"
-          mismatches+=("${path:t}|$branch|$expected_slug")
-        fi
-
-        counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
-        ahead="${counts%% *}"
-        behind="${counts##* }"
-
-        printf "  %-30s ${state_color}%-12s${C_RESET} %-10s ${C_DIM}%-15s${C_RESET}\n" \
-          "${branch:0:28}" "$state_icon" "↑$ahead ↓$behind" "$sha"
+        display_status_row "$path" "$branch"
       fi
       path=""
       branch=""
@@ -1164,30 +1579,13 @@ cmd_status() {
 
   # Handle last entry
   if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-    sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null)" || sha="?"
-    st="$(git -C "$path" status --porcelain 2>/dev/null)" || st=""
-    state_icon="●"
-    state_color="$C_GREEN"
+    display_status_row "$path" "$branch"
+  fi
 
-    if [[ -n "$st" ]]; then
-      changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
-      state_icon="◐ $changes"
-      state_color="$C_YELLOW"
-    fi
-
-    # Check for mismatch
-    local match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
-    if [[ "$match_result" == mismatch\|* ]]; then
-      local expected_slug="${match_result#mismatch|}"
-      mismatches+=("${path:t}|$branch|$expected_slug")
-    fi
-
-    counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
-
-    printf "  %-30s ${state_color}%-12s${C_RESET} %-10s ${C_DIM}%-15s${C_RESET}\n" \
-      "${branch:0:28}" "$state_icon" "↑$ahead ↓$behind" "$sha"
+  # JSON output
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    format_json "[${(j:, :)json_items}]"
+    return 0
   fi
 
   # Show mismatch warnings
@@ -1655,7 +2053,7 @@ cmd_repos() {
       wt_count=$((wt_count - 1))  # Subtract bare repo entry
       json_items+=("{\"name\": \"$(json_escape "$repo")\", \"worktrees\": $wt_count}")
     done <<< "$repos"
-    print -r -- "[${(j:, :)json_items}]"
+    format_json "[${(j:, :)json_items}]"
   else
     print -r -- ""
     print -r -- "${C_BOLD}📦 Repositories in ${C_CYAN}$HERD_ROOT${C_RESET}"
@@ -1668,6 +2066,73 @@ cmd_repos() {
     done <<< "$repos"
     print -r -- ""
   fi
+}
+
+cmd_templates() {
+  local template_name="${1:-}"
+
+  if [[ -z "$template_name" ]]; then
+    # List all templates
+    print -r -- ""
+    print -r -- "${C_BOLD}📋 Available Templates${C_RESET}"
+    print -r -- ""
+    list_templates
+    print -r -- ""
+    print -r -- "${C_DIM}Usage: wt templates <name>  - Show template details${C_RESET}"
+    print -r -- "${C_DIM}       wt add <repo> <branch> --template=<name>${C_RESET}"
+    print -r -- ""
+    return 0
+  fi
+
+  # Show specific template details
+  local template_file="$WT_TEMPLATES_DIR/${template_name}.conf"
+
+  if [[ ! -f "$template_file" ]]; then
+    die "Template not found: $template_name
+       Expected: $template_file"
+  fi
+
+  print -r -- ""
+  print -r -- "${C_BOLD}📋 Template: ${C_CYAN}$template_name${C_RESET}"
+  print -r -- ""
+
+  # Extract description
+  local desc; desc="$(grep '^TEMPLATE_DESC=' "$template_file" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'")"
+  if [[ -n "$desc" ]]; then
+    print -r -- "${C_DIM}Description:${C_RESET} $desc"
+    print -r -- ""
+  fi
+
+  print -r -- "${C_DIM}File:${C_RESET} $template_file"
+  print -r -- ""
+  print -r -- "${C_BOLD}Settings:${C_RESET}"
+
+  # Show all WT_SKIP_* settings
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*$ ]] && continue
+
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+
+    case "$key" in
+      WT_SKIP_*)
+        value="${value#\"}"
+        value="${value%\"}"
+        value="${value%%#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        if [[ "$value" == "true" ]]; then
+          print -r -- "  ${C_YELLOW}$key${C_RESET} = ${C_RED}true${C_RESET} (skipped)"
+        else
+          print -r -- "  ${C_GREEN}$key${C_RESET} = ${C_GREEN}false${C_RESET} (enabled)"
+        fi
+        ;;
+    esac
+  done < "$template_file"
+
+  print -r -- ""
+  print -r -- "${C_DIM}Usage: wt add <repo> <branch> --template=$template_name${C_RESET}"
+  print -r -- ""
 }
 
 cmd_doctor() {
@@ -2495,6 +2960,8 @@ usage() {
   print -r -- ""
   print -r -- "${C_BOLD}CORE COMMANDS${C_RESET}"
   print -r -- "  ${C_GREEN}add${C_RESET}      ${C_DIM}<repo> <branch> [base]${C_RESET}     Create worktree"
+  print -r -- "           ${C_DIM}--template=<name>, -t <name>${C_RESET}  Use template"
+  print -r -- "           ${C_DIM}--dry-run${C_RESET}                     Preview without creating"
   print -r -- "  ${C_GREEN}rm${C_RESET}       ${C_DIM}<repo> [branch]${C_RESET}            Remove worktree"
   print -r -- "  ${C_GREEN}ls${C_RESET}       ${C_DIM}<repo>${C_RESET}                     List worktrees"
   print -r -- "  ${C_GREEN}repos${C_RESET}                               List all repositories"
@@ -2532,6 +2999,9 @@ usage() {
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
   print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
+  print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
+  print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (wt add)"
+  print -r -- "  ${C_YELLOW}-t, --template${C_RESET}       Apply template when creating worktree"
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
@@ -2550,6 +3020,14 @@ usage() {
   print -r -- ""
   print -r -- "  ${C_DIM}# Run command in worktree${C_RESET}"
   print -r -- "  wt exec myapp feature/login php artisan migrate"
+  print -r -- ""
+  print -r -- "  ${C_DIM}# Use template with dry-run preview${C_RESET}"
+  print -r -- "  wt add myapp feature/api --template=backend --dry-run"
+  print -r -- ""
+  print -r -- "${C_BOLD}AVAILABLE TEMPLATES${C_RESET}"
+  list_templates
+  print -r -- ""
+  print -r -- "  ${C_DIM}Run 'wt templates' for details or 'wt templates <name>' to view a template${C_RESET}"
   print -r -- ""
   print -r -- "${C_BOLD}ENVIRONMENT${C_RESET}"
   print -r -- "  ${C_YELLOW}HERD_ROOT${C_RESET}         Herd directory ${C_DIM}(default: \$HOME/Herd)${C_RESET}"
@@ -2613,6 +3091,23 @@ parse_flags() {
       --delete-branch) DELETE_BRANCH=true ;;
       --drop-db) DROP_DB=true ;;
       --no-backup) NO_BACKUP=true ;;
+      --dry-run) DRY_RUN=true ;;
+      --pretty) PRETTY_JSON=true ;;
+      --template=*)
+        WT_TEMPLATE="${1#--template=}"
+        if [[ -z "$WT_TEMPLATE" ]]; then
+          setup_colors
+          die "Template name cannot be empty"
+        fi
+        ;;
+      -t)
+        shift
+        if [[ -z "${1:-}" || "$1" == -* ]]; then
+          setup_colors
+          die "Template name required after -t flag"
+        fi
+        WT_TEMPLATE="$1"
+        ;;
       -v|--version) print -r -- "wt version $VERSION"; exit 0 ;;
       -h|--help|help) setup_colors; usage; exit 0 ;;
       -*) setup_colors; die "Unknown flag: $1" ;;
@@ -2647,6 +3142,7 @@ main() {
     exec)     cmd_exec "$@" ;;
     prune)    cmd_prune "$@" ;;
     repos)    cmd_repos "$@" ;;
+    templates) cmd_templates "$@" ;;
     doctor)   cmd_doctor "$@" ;;
     cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)   cmd_unlock "$@" ;;

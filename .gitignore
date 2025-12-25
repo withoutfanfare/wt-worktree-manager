@@ -14,3 +14,6 @@
 
 # Local testing
 wt-dev
+
+# Test dependencies
+test_modules/
