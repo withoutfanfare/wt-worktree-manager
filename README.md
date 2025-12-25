@@ -26,8 +26,11 @@ wt doctor
 - [Configuration](#configuration)
 - [Getting Started](#getting-started)
 - [Commands Reference](#commands-reference)
-- [Common Workflows](#common-workflows)
+- [Worktree Templates](#worktree-templates)
 - [Repository Structure](#repository-structure)
+- [Testing](#testing)
+- [Security](#security)
+- [Common Workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
 - [Using with Claude Code](#using-wt-with-claude-code)
 
@@ -503,9 +506,12 @@ wt unlock <repo>                # Remove stale git lock files
 | Command | Description |
 |---------|-------------|
 | `wt add <repo> <branch> [base]` | Create a new worktree |
+| `wt add ... --template=<name>` | Create worktree using a template |
 | `wt rm <repo> [branch]` | Remove a worktree |
 | `wt ls <repo>` | List all worktrees with status |
+| `wt status <repo>` | Dashboard view with age, sync, merged status |
 | `wt repos` | List all repositories in HERD_ROOT |
+| `wt templates [name]` | List templates or show template details |
 | `wt clone <url> [name] [branch]` | Clone as bare repo (create specific worktree) |
 
 #### The `repos` command
@@ -1122,7 +1128,171 @@ wt prune myapp -f        # ✔
 | `add` | `--json` |
 | `prune` | `-f` (actually delete merged branches) |
 | `repos` | `--json` |
+| `templates` | View template details |
 | All | `-q` (quiet mode) |
+
+---
+
+## Worktree Templates
+
+Templates let you predefine which setup hooks run when creating worktrees. This is useful when you have different project types or want quick minimal checkouts.
+
+### Listing Templates
+
+```bash
+wt templates
+```
+
+Output:
+```text
+📋 Available Templates
+
+  backend - Backend only - PHP, database, no npm/build
+  laravel - Laravel with MySQL, Composer, NPM, and migrations
+  minimal - Minimal - git worktree only, no setup
+  node - Node.js project (npm only, no PHP/database)
+
+Usage: wt templates <name>  - Show template details
+       wt add <repo> <branch> --template=<name>
+```
+
+### Using a Template
+
+```bash
+# Use --template or -t flag when adding a worktree
+wt add myapp feature/quick-fix --template=minimal
+
+# Short form
+wt add myapp feature/api-work -t backend
+```
+
+### Viewing Template Details
+
+```bash
+wt templates minimal
+```
+
+Output:
+```text
+📋 Template: minimal
+
+Description: Minimal - git worktree only, no setup
+
+File: /Users/you/.wt/templates/minimal.conf
+
+Settings:
+  WT_SKIP_DB = true (skipped)
+  WT_SKIP_COMPOSER = true (skipped)
+  WT_SKIP_NPM = true (skipped)
+  WT_SKIP_BUILD = true (skipped)
+  WT_SKIP_MIGRATE = true (skipped)
+  WT_SKIP_HERD = true (skipped)
+
+Usage: wt add <repo> <branch> --template=minimal
+```
+
+### Creating Custom Templates
+
+Templates are simple key=value files in `~/.wt/templates/`:
+
+```bash
+# ~/.wt/templates/api-only.conf
+TEMPLATE_DESC="API backend - database and PHP only"
+
+WT_SKIP_NPM=true
+WT_SKIP_BUILD=true
+WT_SKIP_HERD=true
+```
+
+### Included Example Templates
+
+The installer includes these templates in `examples/templates/`:
+
+| Template | Description |
+|----------|-------------|
+| `laravel.conf` | Full Laravel setup - database, composer, npm, build, migrations |
+| `node.conf` | Node.js projects - npm only, skips PHP and database |
+| `minimal.conf` | Git worktree only - skips all setup hooks |
+| `backend.conf` | Backend API work - PHP and database, no frontend build |
+
+To install example templates:
+```bash
+cp examples/templates/*.conf ~/.wt/templates/
+```
+
+---
+
+## Testing
+
+The project includes a comprehensive test suite using [BATS](https://github.com/bats-core/bats-core) (Bash Automated Testing System).
+
+### Running Tests
+
+```bash
+# Run all tests
+./run-tests.sh
+
+# Run only unit tests
+./run-tests.sh unit
+
+# Run only integration tests
+./run-tests.sh integration
+
+# Run a specific test file
+./run-tests.sh validation.bats
+```
+
+### Test Coverage
+
+The test suite includes **168 tests** covering:
+
+- **Input validation** - Security-critical path traversal, git flag injection, reserved references
+- **Branch slugification** - Converting branch names to filesystem-safe slugs
+- **Database naming** - MySQL 64-character limits, hash suffix for long names
+- **URL generation** - Worktree paths and URLs with subdomain support
+- **JSON escaping** - Proper escaping for JSON output (including control characters)
+- **Config parsing** - Security whitelist enforcement, injection prevention
+- **Template security** - Path traversal prevention, variable injection protection
+
+### Installing BATS
+
+```bash
+# macOS (Homebrew)
+brew install bats-core
+
+# npm
+npm install -g bats
+
+# Or use the bundled version
+git clone https://github.com/bats-core/bats-core.git test_modules/bats
+```
+
+---
+
+## Security
+
+`wt` is designed with security in mind:
+
+### Input Validation
+- **Path traversal protection** - Repository and branch names are validated to prevent `../` attacks
+- **Git flag injection prevention** - Names starting with `-` are rejected to prevent flag injection
+- **Reserved reference blocking** - Special git references (`HEAD`, `refs/`) are blocked as branch names
+
+### Configuration Security
+- **Config whitelist** - Only specific configuration variables are loaded from `.wtrc` files
+- **No code execution** - Config files are parsed as key-value pairs, not sourced as shell scripts
+- **Hook verification** - Hooks must be owned by the current user and not world-writable
+
+### Template Security
+- **Template name validation** - Only alphanumeric characters, dashes, and underscores allowed
+- **Path traversal prevention** - Template names cannot contain `..`, `/`, or `\`
+- **Variable injection protection** - Template variables only accept `true` or `false` values
+
+### Reporting Security Issues
+
+If you discover a security vulnerability, please report it responsibly by opening a private issue or contacting the maintainer directly.
+
+---
 
 ## Common Workflows
 
