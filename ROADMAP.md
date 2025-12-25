@@ -6,19 +6,23 @@ A prioritised roadmap for future development of the wt worktree manager.
 
 ## Overview
 
-**Current State (v3.9.0):**
+**Current State (v4.0.0):**
 - Mature, production-ready Git worktree manager
 - Framework-agnostic with hook-based extensibility
-- 24 commands covering full worktree lifecycle
+- **28 commands** covering full worktree lifecycle
 - Comprehensive documentation
 - macOS/Zsh focused
 - **187 automated tests** (BATS test suite)
 - **Template system** for standardised worktree setups
 - **Enhanced status dashboard** with stale/merge indicators
+- **Modular architecture** with 18 focused modules in `lib/`
+- **Interactive mode** for guided worktree creation
+- **Progress indicators** (spinners) for long operations
+- **Parallel operations** (fresh-all, build-all, exec-all)
+- **Resilience improvements** (repair, lock cleanup, retry logic)
 
 **Key Gaps Identified:**
 - macOS-only (no Linux/WSL support)
-- Single monolithic script
 - Limited CI/CD integration (shellcheck + BATS locally, no GitHub Actions yet)
 - No plugin ecosystem
 
@@ -67,22 +71,36 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [ ] Pre-commit hooks for contributors
 - [ ] Automated changelog generation from conventional commits
 
-### 1.3 Code Modularisation
-**Why:** 2,666-line monolith is difficult to maintain
+### 1.3 Code Modularisation ✅ COMPLETE (v4.0.0)
+**Why:** 3,162-line monolith was difficult to maintain
 
-- [ ] Split into modular files:
+- [x] Split into modular files (18 modules):
   ```text
   lib/
-  ├── core.sh       # Config loading, helpers
-  ├── git.sh        # Git operations
-  ├── hooks.sh      # Hook system
-  ├── database.sh   # Database operations
-  ├── navigation.sh # cd, code, open, switch
-  └── commands/     # Individual command files
+  ├── 00-header.sh      # Version, global defaults
+  ├── 01-core.sh        # Config loading, colours, output helpers
+  ├── 02-validation.sh  # Input validation, security
+  ├── 03-paths.sh       # Path resolution, URL generation
+  ├── 04-git.sh         # Git operations, branch helpers
+  ├── 05-database.sh    # MySQL operations
+  ├── 06-hooks.sh       # Hook system with security
+  ├── 07-templates.sh   # Template loading
+  ├── 08-spinner.sh     # Progress indicators (NEW)
+  ├── 09-parallel.sh    # Parallel execution (NEW)
+  ├── 10-interactive.sh # Interactive wizard (NEW)
+  ├── 11-resilience.sh  # Retry, transactions (NEW)
+  ├── 99-main.sh        # Entry point, usage, flags
+  └── commands/
+      ├── lifecycle.sh  # add, rm, clone, fresh
+      ├── git-ops.sh    # pull, pull-all, sync, prune
+      ├── navigation.sh # code, open, cd, switch, exec
+      ├── info.sh       # ls, status, repos, health, report
+      ├── utility.sh    # doctor, cleanup-herd, unlock, repair
+      └── laravel.sh    # migrate, tinker
   ```
 
-- [ ] Main `wt` script sources modules
-- [ ] Maintain backwards compatibility (single-file install option)
+- [x] `build.sh` concatenates modules into single `wt` file for distribution
+- [x] Backwards compatible (single-file install still works)
 
 ---
 
@@ -117,16 +135,17 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 
 ## Phase 3: User Experience Improvements (Medium Priority)
 
-### 3.1 Interactive Mode
+### 3.1 Interactive Mode ✅ COMPLETE (v4.0.0)
 **Why:** Guided workflows for new users
 
-- [ ] `wt add --interactive` with prompts:
-  - Select repository (fzf list)
-  - Choose base branch
-  - Name new branch
-  - Select hooks to run
+- [x] `wt add --interactive` / `-i` with 5-step wizard:
+  1. Select repository (fzf picker)
+  2. Choose base branch (fzf picker)
+  3. Name new branch (with live preview of path, URL, database)
+  4. Select template (optional fzf picker)
+  5. Confirm with full summary
+- [x] Requires fzf to be installed (die with install instructions if missing)
 - [ ] `wt setup` wizard for first-time configuration
-- [ ] Confirmation prompts with `--yes` flag to skip
 
 ### 3.2 Enhanced Status Dashboard ✅ COMPLETE (v3.8.0)
 **Why:** Better visibility into worktree state
@@ -150,14 +169,15 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [ ] Recent branches shortcut: `wt cd scooda @1` (most recent)
 - [ ] Branch name autocomplete from remote
 
-### 3.4 Progress Indicators
+### 3.4 Progress Indicators ✅ COMPLETE (v4.0.0)
 **Why:** Long operations feel unresponsive
 
-- [ ] Spinner/progress for:
-  - `composer install`
-  - `npm ci`
-  - Database operations
-  - `pull-all` parallel operations
+- [x] Spinner animation (Braille pattern) for long operations:
+  - `spinner_start "message"` / `spinner_stop "ok|fail|skip"`
+  - `with_spinner "message" command...` - Wrap commands with progress
+  - Step progress indicator for multi-step operations
+- [x] Spinner available for hooks to use in `composer install`, `npm ci`, etc.
+- [x] Progress indication in `pull-all` and parallel operations
 - [ ] Estimated time remaining for builds
 
 ---
@@ -258,15 +278,17 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 
 ## Phase 6: Performance & Reliability (Lower Priority)
 
-### 6.1 Parallel Operations
+### 6.1 Parallel Operations ✅ COMPLETE (v4.0.0)
 **Why:** Faster multi-worktree operations
 
-- [ ] Parallel execution for:
-  - `wt fresh-all` - Fresh all worktrees
-  - `wt build-all` - Build all worktrees
-  - `wt prune --parallel` - Parallel cleanup
-- [ ] Configurable concurrency limit
-- [ ] Progress aggregation for parallel ops
+- [x] Parallel execution for:
+  - `wt fresh-all <repo>` - migrate:fresh + npm build on all worktrees
+  - `wt build-all <repo>` - npm run build on all worktrees
+  - `wt exec-all <repo> <cmd>` - Execute any command on all worktrees
+  - `wt pull-all <repo>` - Already parallel (enhanced)
+- [x] Configurable concurrency limit: `WT_MAX_PARALLEL` (default: 4)
+- [x] `parallel_run` framework for adding parallel operations to any command
+- [ ] `wt prune --parallel` - Parallel cleanup
 
 ### 6.2 Caching Layer
 **Why:** Avoid redundant operations
@@ -276,15 +298,19 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [ ] Dependency cache sharing across worktrees
 - [ ] Cache invalidation triggers
 
-### 6.3 Resilience Improvements
+### 6.3 Resilience Improvements ✅ COMPLETE (v4.0.0)
 **Why:** Graceful handling of edge cases
 
-- [ ] Automatic lock file cleanup on stale locks
-- [ ] Transaction-like operations (rollback on failure)
-- [ ] Better handling of:
-  - Network failures during fetch
-  - Disk space exhaustion
-  - Concurrent wt operations
+- [x] **`wt repair [repo]`** - New command to fix common issues:
+  - Prunes orphaned worktree entries
+  - Removes stale git index locks (>5 min old)
+  - Checks for missing `.git` files in worktrees
+- [x] Automatic lock file cleanup: `check_index_locks <git_dir> [--auto-clean]`
+- [x] Transaction pattern: `transaction_start`, `transaction_register`, `transaction_commit`
+  - Automatic rollback on failure with trap handlers
+- [x] Retry logic: `with_retry <max_attempts> <command>` with exponential backoff
+- [x] Disk space checks: `check_disk_space <path> <min_mb>` before operations
+- [ ] Better handling of network failures during fetch
 - [ ] Recovery mode for corrupted worktrees
 
 ---
@@ -367,11 +393,15 @@ These require minimal effort but add value:
 | P0 | 1.1 Testing | High | Critical | ✅ DONE |
 | P0 | 2.1 Linux | Medium | High | |
 | P1 | 1.2 CI/CD | Medium | High | 🔄 Partial |
+| P1 | 1.3 Modularise | High | Medium | ✅ DONE |
+| P1 | 3.1 Interactive | Medium | Medium | ✅ DONE |
 | P1 | 3.2 Status | Low | Medium | ✅ DONE |
+| P1 | 3.4 Progress | Low | Medium | ✅ DONE |
 | P1 | Quick Wins | Low | Medium | 🔄 Partial |
-| P2 | 1.3 Modularise | High | Medium | |
 | P2 | 4.1 Templates | Medium | Medium | ✅ DONE |
 | P2 | 5.1 GitHub | Medium | High | |
+| P2 | 6.1 Parallel | Medium | Medium | ✅ DONE |
+| P2 | 6.3 Resilience | Medium | Medium | ✅ DONE |
 | P3 | 2.2 WSL | Medium | Medium | |
 | P3 | 4.2 Dep Sharing | High | Medium | |
 | P3 | 5.2 IDE | High | High | |
@@ -394,8 +424,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup. When working on ro
 - **v3.7.0** - Hook-based architecture, framework-agnostic
 - **v3.8.0** - Testing framework (187 tests), enhanced status, templates ✅
 - **v3.8.1** - Security hardening (template validation, injection prevention) ✅
-- **v3.9.0** - Developer experience (dry-run, pretty JSON, suggestions) ✅ **CURRENT**
-- **v4.0** - Linux support + GitHub Actions CI (breaking: config changes)
-- **v4.x** - Further UX improvements
-- **v5.0** - Modular architecture (breaking: installation changes)
+- **v3.9.0** - Developer experience (dry-run, pretty JSON, suggestions) ✅
+- **v4.0.0** - Major release: modular architecture, interactive mode, spinners, parallel ops, resilience ✅ **CURRENT**
+- **v4.x** - Linux support + GitHub Actions CI
+- **v5.0** - Cross-platform (breaking: config changes for Linux/WSL)
 - **v5.x** - Integrations, enterprise features

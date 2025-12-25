@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2025-12-25
+
+### Added
+
+#### Code Modularisation
+- **Modular architecture** - The 3,162-line monolithic script has been refactored into 18 focused modules in `lib/` for better maintainability
+- **Build system** - `build.sh` concatenates modules into a single `wt` file for distribution
+- **Module structure**:
+  - `lib/00-header.sh` - Version, global defaults, flags
+  - `lib/01-core.sh` - Config loading, colours, output helpers
+  - `lib/02-validation.sh` - Input validation, security checks
+  - `lib/03-paths.sh` - Path resolution, URL generation
+  - `lib/04-git.sh` - Git operations, branch helpers
+  - `lib/05-database.sh` - MySQL operations
+  - `lib/06-hooks.sh` - Hook system with security verification
+  - `lib/07-templates.sh` - Template loading
+  - `lib/08-spinner.sh` - Progress indicators
+  - `lib/09-parallel.sh` - Parallel execution framework
+  - `lib/10-interactive.sh` - Interactive wizard
+  - `lib/11-resilience.sh` - Retry logic, transactions, lock cleanup
+  - `lib/commands/*.sh` - Command implementations
+
+#### Interactive Mode
+- **`wt add --interactive` / `-i`** - Guided worktree creation wizard with 5 steps:
+  1. Repository selection (fzf picker)
+  2. Base branch selection (fzf picker)
+  3. Branch name input with live preview (path, URL, database)
+  4. Template selection (optional fzf picker)
+  5. Confirmation with full summary
+- Requires fzf to be installed
+
+#### Progress Indicators
+- **Spinner animation** - Braille-pattern spinner for long operations
+- `spinner_start "message"` / `spinner_stop "ok|fail|skip"` - Background spinner control
+- `with_spinner "message" command...` - Wrap commands with progress indication
+- Step progress indicator for multi-step operations
+
+#### Parallel Operations
+- **`wt fresh-all <repo>`** - Run `migrate:fresh --seed` + npm build on all worktrees
+- **`wt build-all <repo>`** - Run `npm run build` on all worktrees
+- **`wt exec-all <repo> <command>`** - Execute any command across all worktrees
+- Configurable concurrency via `WT_MAX_PARALLEL` environment variable (default: 4)
+
+#### Resilience Improvements
+- **`wt repair [repo]`** - Scan for and fix common issues:
+  - Prunes orphaned worktree entries
+  - Removes stale git index locks
+  - Checks for missing `.git` files in worktrees
+- **Retry logic** - `with_retry <max_attempts> <command>` with exponential backoff
+- **Transaction pattern** - Rollback support for failed multi-step operations
+- **Disk space checks** - Pre-flight checks before operations
+- **Lock cleanup** - Automatic detection and removal of stale index locks (>5 min old)
+
+### Changed
+- **Version 4.0.0** - Major version bump for architectural changes
+- **Help text** - Updated to show new commands and flags
+- **Default parallel limit** - 4 concurrent operations (configurable via `WT_MAX_PARALLEL`)
+
+### Developer Notes
+- Modules are sourced in dependency order (00 through 99)
+- Each module is self-contained with its shebang stripped during build
+- Tests continue to work against the built `wt` file
+- Development workflow: edit modules in `lib/`, run `./build.sh`, test with `./wt`
+
 ## [3.9.0] - 2025-12-25
 
 ### Added

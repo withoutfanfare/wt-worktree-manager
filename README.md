@@ -29,6 +29,7 @@ wt doctor
 - [Worktree Templates](#worktree-templates)
 - [Repository Structure](#repository-structure)
 - [Testing](#testing)
+- [Developer Guide](#developer-guide)
 - [Security](#security)
 - [Common Workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
@@ -466,6 +467,7 @@ wt rm myapp        # Pick which one to remove
 wt clone <git-url>              # Clone as bare repo (auto-creates staging)
 wt clone <git-url> <name> <branch>  # Clone and create specific worktree
 wt add <repo> <branch>          # Create worktree
+wt add -i                       # Interactive worktree creation wizard
 wt repos                        # List all repositories
 wt doctor                       # Check system requirements
 
@@ -486,6 +488,11 @@ wt fresh <repo> <branch>        # migrate:fresh + npm ci + build
 wt migrate <repo> <branch>      # Run migrations
 wt tinker <repo> <branch>       # Open tinker
 
+# Parallel operations (v4.0.0)
+wt fresh-all <repo>             # migrate:fresh + build on all worktrees
+wt build-all <repo>             # npm run build on all worktrees
+wt exec-all <repo> <cmd>        # Run command on all worktrees
+
 # Cleanup
 wt rm <repo> <branch>           # Remove worktree (backs up DB)
 wt rm --drop-db <repo> <branch> # Remove and drop database
@@ -495,6 +502,7 @@ wt prune -f <repo>              # Delete merged branches
 # Maintenance
 wt health <repo>                # Check repository health
 wt report <repo>                # Generate markdown status report
+wt repair [repo]                # Fix orphaned worktrees, stale locks
 wt cleanup-herd                 # Remove orphaned Herd nginx configs
 wt unlock <repo>                # Remove stale git lock files
 ```
@@ -506,7 +514,9 @@ wt unlock <repo>                # Remove stale git lock files
 | Command | Description |
 |---------|-------------|
 | `wt add <repo> <branch> [base]` | Create a new worktree |
+| `wt add -i` / `--interactive` | Interactive worktree creation wizard |
 | `wt add ... --template=<name>` | Create worktree using a template |
+| `wt add ... --dry-run` | Preview worktree creation without executing |
 | `wt rm <repo> [branch]` | Remove a worktree |
 | `wt ls <repo>` | List all worktrees with status |
 | `wt status <repo>` | Dashboard view with age, sync, merged status |
@@ -926,9 +936,28 @@ Displays the last 15 commits in a compact one-line format with relative dates.
 | `wt exec <repo> <branch> <cmd>` | Run command in worktree |
 | `wt health <repo>` | Check repository health |
 | `wt report <repo> [--output <file>]` | Generate markdown status report |
+| `wt repair [repo]` | Fix orphaned worktrees, remove stale locks |
 | `wt doctor` | Check system requirements |
 | `wt cleanup-herd` | Remove orphaned Herd nginx configs |
 | `wt unlock [repo]` | Remove stale git lock files |
+
+### Parallel Operations
+
+| Command | Description |
+|---------|-------------|
+| `wt fresh-all <repo>` | Run `migrate:fresh --seed` + npm build on all worktrees |
+| `wt build-all <repo>` | Run `npm run build` on all worktrees |
+| `wt exec-all <repo> <cmd>` | Execute command across all worktrees |
+| `wt pull-all <repo>` | Pull all worktrees (parallel) |
+
+#### Parallel concurrency
+
+Configure the maximum number of parallel operations via the `WT_MAX_PARALLEL` environment variable (default: 4):
+
+```bash
+# In ~/.wtrc
+WT_MAX_PARALLEL=8
+```
 
 #### The `clone` command
 
@@ -1104,7 +1133,11 @@ Generated: 2025-12-24 10:30:00
 |------|-------------|
 | `-q, --quiet` | Suppress informational output |
 | `-f, --force` | Skip confirmations, force operations |
+| `-i, --interactive` | Interactive worktree creation wizard |
+| `--dry-run` | Preview worktree creation without executing |
 | `--json` | Output in JSON format (for `ls` and `add`) |
+| `--pretty` | Colourised, formatted JSON output |
+| `-t, --template=<name>` | Use a template when creating worktree |
 | `--delete-branch` | Delete branch when removing worktree |
 | `--drop-db` | Drop database after backup (with `rm`) |
 | `--no-backup` | Skip database backup (with `rm`) |
@@ -1123,9 +1156,10 @@ wt prune myapp -f        # ✔
 
 | Command | Useful flags |
 |---------|--------------|
+| `add` | `-i` (interactive), `--dry-run`, `--json`, `-t`/`--template` |
 | `rm` | `-f` (force), `--delete-branch`, `--drop-db`, `--no-backup` |
-| `ls` | `--json` |
-| `add` | `--json` |
+| `ls` | `--json`, `--pretty` |
+| `status` | `--json`, `--pretty` |
 | `prune` | `-f` (actually delete merged branches) |
 | `repos` | `--json` |
 | `templates` | View template details |
@@ -1244,7 +1278,7 @@ The project includes a comprehensive test suite using [BATS](https://github.com/
 
 ### Test Coverage
 
-The test suite includes **168 tests** covering:
+The test suite includes **187 tests** covering:
 
 - **Input validation** - Security-critical path traversal, git flag injection, reserved references
 - **Branch slugification** - Converting branch names to filesystem-safe slugs
@@ -1266,6 +1300,154 @@ npm install -g bats
 # Or use the bundled version
 git clone https://github.com/bats-core/bats-core.git test_modules/bats
 ```
+
+---
+
+## Developer Guide
+
+This section is for developers who want to contribute to `wt` or understand its internal architecture.
+
+### Modular Architecture
+
+As of v4.0.0, `wt` uses a modular architecture. The source code is split into focused modules in `lib/`, then concatenated into a single `wt` file for distribution.
+
+```text
+lib/
+├── 00-header.sh       # Shebang, version, global defaults
+├── 01-core.sh         # Config loading, colours, output helpers
+├── 02-validation.sh   # Input validation, security checks
+├── 03-paths.sh        # Path resolution, URL generation
+├── 04-git.sh          # Git operations, branch helpers
+├── 05-database.sh     # MySQL operations
+├── 06-hooks.sh        # Hook system with security verification
+├── 07-templates.sh    # Template loading
+├── 08-spinner.sh      # Progress indicators (spinners)
+├── 09-parallel.sh     # Parallel execution framework
+├── 10-interactive.sh  # Interactive wizard (fzf-based)
+├── 11-resilience.sh   # Retry logic, transactions, lock cleanup
+├── 99-main.sh         # Entry point, usage, flag parsing
+└── commands/
+    ├── lifecycle.sh   # add, rm, clone, fresh
+    ├── git-ops.sh     # pull, pull-all, sync, prune
+    ├── navigation.sh  # code, open, cd, switch, exec
+    ├── info.sh        # ls, status, repos, health, report
+    ├── utility.sh     # doctor, templates, cleanup, repair
+    └── laravel.sh     # migrate, tinker
+```
+
+### Building from Source
+
+The `build.sh` script concatenates all modules into a single executable:
+
+```bash
+# Build the wt script
+./build.sh
+
+# Build to a custom location
+./build.sh --output /path/to/output
+```
+
+The build process:
+1. Starts with `00-header.sh` (includes shebang)
+2. Concatenates modules in order (stripping shebangs)
+3. Adds command modules from `lib/commands/`
+4. Appends `99-main.sh` (entry point)
+5. Makes the output executable
+
+### Development Workflow
+
+```bash
+# 1. Edit modules in lib/
+vim lib/02-validation.sh
+
+# 2. Build the script
+./build.sh
+
+# 3. Test your changes
+./wt doctor
+
+# 4. Run the test suite
+./run-tests.sh
+
+# 5. Run specific tests
+./run-tests.sh unit
+./run-tests.sh integration
+./run-tests.sh validation.bats
+```
+
+### Module Dependencies
+
+Modules are sourced in numeric order. Each module may depend on functions from earlier modules:
+
+| Module | Dependencies |
+|--------|--------------|
+| `00-header.sh` | None |
+| `01-core.sh` | None |
+| `02-validation.sh` | core |
+| `03-paths.sh` | core, validation |
+| `04-git.sh` | core, paths |
+| `05-database.sh` | core |
+| `06-hooks.sh` | core, validation |
+| `07-templates.sh` | core, validation, paths |
+| `08-spinner.sh` | core |
+| `09-parallel.sh` | core, spinner |
+| `10-interactive.sh` | core, paths, templates |
+| `11-resilience.sh` | core |
+| `commands/*.sh` | All above |
+
+### Adding a New Command
+
+1. Determine which command module fits your command (or create a new one)
+2. Add your function with the `cmd_` prefix:
+   ```zsh
+   cmd_mycommand() {
+     local repo="${1:-}"
+     # ... implementation
+   }
+   ```
+3. Register it in `lib/99-main.sh` in the `main()` function's case statement
+4. Add help text in the `usage()` function
+5. Add tests in `tests/`
+6. Run `./build.sh` and test
+
+### Adding a New Module
+
+1. Create the module file with appropriate number prefix (e.g., `lib/12-newmodule.sh`)
+2. Add a shebang and module comment:
+   ```zsh
+   #!/usr/bin/env zsh
+   # 12-newmodule.sh - Description of module purpose
+   ```
+3. Add the module to the `MODULES` array in `build.sh`
+4. Run `./build.sh` and test
+
+### Test Structure
+
+```text
+tests/
+├── unit/
+│   ├── validation.bats      # Input validation tests
+│   ├── slugify.bats         # Branch slugification
+│   ├── db-naming.bats       # Database name generation
+│   ├── url-generation.bats  # URL/path generation
+│   ├── json-escape.bats     # JSON escaping
+│   ├── config-parsing.bats  # Config file parsing
+│   └── template-security.bats
+├── integration/
+│   └── commands.bats        # CLI parsing, help, validation
+├── test-helper.bash         # Shared test utilities
+└── run-tests.sh             # Test runner
+```
+
+### Code Style
+
+- Use zsh syntax (this is not a POSIX shell script)
+- Prefer `local` for function-scoped variables
+- Use `readonly` for constants
+- Quote variables: `"$var"` not `$var`
+- Use `[[ ]]` for conditionals (not `[ ]`)
+- Use meaningful function and variable names
+- Add comments for non-obvious logic
 
 ---
 
@@ -1425,8 +1607,37 @@ This section describes the files in the wt-worktree-manager repository itself.
 ```text
 wt-worktree-manager/
 │
-├── wt                          # Main script - the worktree manager (87KB)
+├── wt                          # Built executable (generated by build.sh)
 ├── _wt                         # Zsh tab completion definitions
+├── build.sh                    # Build script - concatenates lib/ into wt
+│
+├── lib/                        # Source modules (v4.0.0+)
+│   ├── 00-header.sh           # Version, global defaults
+│   ├── 01-core.sh             # Config, colours, output helpers
+│   ├── 02-validation.sh       # Input validation, security
+│   ├── 03-paths.sh            # Path resolution, URL generation
+│   ├── 04-git.sh              # Git operations, branch helpers
+│   ├── 05-database.sh         # MySQL operations
+│   ├── 06-hooks.sh            # Hook system with security
+│   ├── 07-templates.sh        # Template loading
+│   ├── 08-spinner.sh          # Progress indicators
+│   ├── 09-parallel.sh         # Parallel execution
+│   ├── 10-interactive.sh      # Interactive wizard
+│   ├── 11-resilience.sh       # Retry, transactions, locks
+│   ├── 99-main.sh             # Entry point, usage, flags
+│   └── commands/
+│       ├── lifecycle.sh       # add, rm, clone, fresh
+│       ├── git-ops.sh         # pull, pull-all, sync, prune
+│       ├── navigation.sh      # code, open, cd, switch, exec
+│       ├── info.sh            # ls, status, repos, health
+│       ├── utility.sh         # doctor, cleanup, repair
+│       └── laravel.sh         # migrate, tinker
+│
+├── tests/                      # BATS test suite (187 tests)
+│   ├── unit/                  # Unit tests
+│   ├── integration/           # Integration tests
+│   ├── test-helper.bash       # Shared utilities
+│   └── run-tests.sh           # Test runner
 │
 ├── install.sh                  # Installer - sets up symlinks, config, hooks
 ├── uninstall.sh                # Uninstaller - removes symlinks, preserves data
@@ -1434,10 +1645,16 @@ wt-worktree-manager/
 ├── .wtrc.example               # Example configuration file
 ├── README.md                   # This documentation
 ├── CHANGELOG.md                # Version history and release notes
+├── ROADMAP.md                  # Feature roadmap
 ├── CONTRIBUTING.md             # Contribution guidelines
 ├── LICENSE                     # MIT license
 │
 └── examples/
+    ├── templates/              # Example worktree templates
+    │   ├── laravel.conf
+    │   ├── node.conf
+    │   ├── minimal.conf
+    │   └── backend.conf
     └── hooks/                  # Example lifecycle hooks
         ├── README.md           # Comprehensive hooks documentation
         ├── post-add.d/         # Scripts run after worktree creation
@@ -1465,12 +1682,15 @@ wt-worktree-manager/
 
 | File | Purpose |
 |------|---------|
-| `wt` | The main executable containing all commands |
+| `wt` | The built executable (generated by `build.sh`) |
+| `lib/` | Source modules - edit these to modify wt |
+| `build.sh` | Builds `wt` from modules in `lib/` |
 | `_wt` | Zsh completion script for tab completion |
 | `install.sh` | Sets up symlinks, creates config and hooks directory |
 | `uninstall.sh` | Removes symlinks, preserves user data |
 | `.wtrc.example` | Template for `~/.wtrc` configuration |
 | `examples/hooks/` | Example lifecycle hooks you can copy to `~/.wt/hooks/` |
+| `examples/templates/` | Example worktree templates |
 
 ### User Data Locations
 
@@ -1665,9 +1885,45 @@ MySQL database names are limited to 64 characters. If your repo + branch name ex
 
 ## Version
 
-Current version: **3.7.0**
+Current version: **4.0.0**
 
 Check with: `wt --version`
+
+### What's New in 4.0.0
+
+**Major architecture overhaul:**
+- **Modular architecture** - The 3,162-line monolithic script has been refactored into 18 focused modules in `lib/` for better maintainability
+- **Build system** - `build.sh` concatenates modules into a single `wt` file for distribution
+- **187 tests** - Expanded test suite covering all new functionality
+
+**Interactive mode:**
+- **`wt add --interactive` / `-i`** - Guided worktree creation wizard with 5 steps:
+  1. Repository selection (fzf picker)
+  2. Base branch selection (fzf picker)
+  3. Branch name input with live preview (path, URL, database)
+  4. Template selection (optional fzf picker)
+  5. Confirmation with full summary
+
+**Progress indicators:**
+- **Spinner animation** - Braille-pattern spinner for long operations
+- Spinners available for hooks to use in `composer install`, `npm ci`, etc.
+
+**Parallel operations:**
+- **`wt fresh-all <repo>`** - Run `migrate:fresh --seed` + npm build on all worktrees
+- **`wt build-all <repo>`** - Run `npm run build` on all worktrees
+- **`wt exec-all <repo> <cmd>`** - Execute any command across all worktrees
+- Configurable concurrency via `WT_MAX_PARALLEL` (default: 4)
+
+**Resilience improvements:**
+- **`wt repair [repo]`** - Scan for and fix common issues (orphaned worktrees, stale locks)
+- **Retry logic** - Exponential backoff for transient failures
+- **Lock cleanup** - Automatic detection and removal of stale index locks
+- **Disk space checks** - Pre-flight checks before operations
+
+**Developer experience:**
+- **`--dry-run` flag** - Preview worktree creation without executing
+- **`--pretty` flag** - Colourised JSON output
+- **"Did you mean?" suggestions** - Helpful suggestions for mistyped template names
 
 ### What's New in 3.7.0
 

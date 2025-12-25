@@ -66,7 +66,7 @@ run_wt() {
   run_wt --version
   [ "$status" -eq 0 ]
   [[ "$output" == *"wt version"* ]]
-  [[ "$output" == *"3."* ]]
+  [[ "$output" == *"4."* ]]
 }
 
 @test "wt help: shows usage (alternative syntax)" {

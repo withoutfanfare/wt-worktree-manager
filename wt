@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.9.0"
+readonly VERSION="4.0.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
@@ -38,12 +38,18 @@ DRY_RUN=false
 DELETE_BRANCH=false
 DROP_DB=false
 NO_BACKUP=false
+INTERACTIVE=false
+
+# Parallel operations config
+WT_MAX_PARALLEL="${WT_MAX_PARALLEL:-4}"
 
 # Protected branches (cannot be removed without --force)
 PROTECTED_BRANCHES="${WT_PROTECTED_BRANCHES:-staging main master}"
 
 # Colour defaults (will be set properly by setup_colors)
 C_RESET="" C_BOLD="" C_DIM="" C_RED="" C_GREEN="" C_YELLOW="" C_BLUE="" C_MAGENTA="" C_CYAN=""
+
+# 01-core.sh - Configuration loading, colours, output helpers
 
 # Load config file safely (key=value parsing, not source)
 load_config() {
@@ -76,6 +82,7 @@ load_config() {
         DEFAULT_BASE) DEFAULT_BASE="$value" ;;
         DEFAULT_EDITOR) DEFAULT_EDITOR="$value" ;;
         WT_URL_SUBDOMAIN) WT_URL_SUBDOMAIN="$value" ;;
+        WT_MAX_PARALLEL) WT_MAX_PARALLEL="$value" ;;
         DB_HOST) DB_HOST="$value" ;;
         DB_USER) DB_USER="$value" ;;
         DB_PASSWORD) DB_PASSWORD="$value" ;;
@@ -165,6 +172,19 @@ notify() {
   fi
 }
 
+# Confirmation helper
+confirm() {
+  local msg="$1"
+  [[ "$FORCE" == true ]] && return 0
+
+  print -n "${C_YELLOW}$msg [y/N]${C_RESET} "
+  local response
+  read -r response
+  [[ "$response" =~ ^[Yy]$ ]]
+}
+
+# 02-validation.sh - Input validation and security checks
+
 # Check if branch is protected
 is_protected_branch() {
   local branch="$1"
@@ -246,6 +266,8 @@ validate_name() {
     die "Invalid $type name: '$input' (malformed path)"
   fi
 }
+
+# 03-paths.sh - Path resolution, worktree detection, URL generation
 
 sed_inplace() {
   local pattern="$1" file="$2"
@@ -463,183 +485,7 @@ url_for() {
   fi
 }
 
-db_name_for() {
-  local repo="$1"
-  local branch="$2"
-  local slug; slug="$(slugify_branch "$branch")"
-  # Replace dashes with underscores for MySQL compatibility
-  local db_name="${repo}__${slug}"
-  db_name="${db_name//-/_}"
-
-  # MySQL database name limit is 64 characters
-  if (( ${#db_name} > 64 )); then
-    # Truncate and add hash suffix for uniqueness
-    local hash; hash="$(print -r -- "$slug" | md5 | cut -c1-8)"
-    local max_repo_len=$((64 - 11))  # Leave room for __<8-char-hash>
-    local truncated_repo="${repo:0:$max_repo_len}"
-    db_name="${truncated_repo}__${hash}"
-    db_name="${db_name//-/_}"
-  fi
-
-  print -r -- "$db_name"
-}
-
-create_database() {
-  local db_name="$1"
-
-  if [[ "$DB_CREATE" != "true" ]]; then
-    dim "  💡 Database creation disabled (WT_DB_CREATE=false)"
-    return 0
-  fi
-
-  if ! command -v mysql >/dev/null 2>&1; then
-    warn "MySQL client not found - skipping database creation"
-    dim "  💡 Create manually: CREATE DATABASE \`$db_name\`;"
-    return 0
-  fi
-
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-  if [[ -n "$DB_PASSWORD" ]]; then
-    mysql_cmd+=(-p"$DB_PASSWORD")
-  fi
-
-  info "Creating database ${C_CYAN}$db_name${C_RESET}"
-
-  if "${mysql_cmd[@]}" -e "CREATE DATABASE IF NOT EXISTS \`$db_name\`;" 2>/dev/null; then
-    ok "Database created: $db_name"
-    return 0
-  else
-    warn "Could not create database - check MySQL connection"
-    dim "  💡 Create manually: CREATE DATABASE \`$db_name\`;"
-    return 1
-  fi
-}
-
-backup_database() {
-  local db_name="$1"
-  local repo="$2"
-
-  if [[ "$DB_BACKUP" != "true" ]]; then
-    dim "  💡 Database backup disabled (WT_DB_BACKUP=false)"
-    return 0
-  fi
-
-  if ! command -v mysqldump >/dev/null 2>&1; then
-    warn "mysqldump not found - skipping database backup"
-    return 0
-  fi
-
-  # Check if database exists
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-  if [[ -n "$DB_PASSWORD" ]]; then
-    mysql_cmd+=(-p"$DB_PASSWORD")
-  fi
-
-  if ! "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
-    dim "  💡 Database $db_name does not exist - skipping backup"
-    return 0
-  fi
-
-  # Create backup directory
-  local backup_dir="$DB_BACKUP_DIR/$repo"
-  mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
-
-  # Generate backup filename with timestamp
-  local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
-  local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
-
-  local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
-  if [[ -n "$DB_PASSWORD" ]]; then
-    mysqldump_cmd+=(-p"$DB_PASSWORD")
-  fi
-
-  info "Backing up database ${C_CYAN}$db_name${C_RESET}"
-
-  if "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
-    ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
-    return 0
-  else
-    warn "Could not backup database"
-    rm -f "$backup_file" 2>/dev/null
-    return 1
-  fi
-}
-
-drop_database() {
-  local db_name="$1"
-
-  if ! command -v mysql >/dev/null 2>&1; then
-    warn "MySQL client not found - cannot drop database"
-    return 1
-  fi
-
-  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
-  if [[ -n "$DB_PASSWORD" ]]; then
-    mysql_cmd+=(-p"$DB_PASSWORD")
-  fi
-
-  # Check if database exists
-  if ! "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
-    dim "  💡 Database $db_name does not exist"
-    return 0
-  fi
-
-  info "Dropping database ${C_CYAN}$db_name${C_RESET}"
-
-  if "${mysql_cmd[@]}" -e "DROP DATABASE \`$db_name\`;" 2>/dev/null; then
-    ok "Database dropped: $db_name"
-    return 0
-  else
-    warn "Could not drop database"
-    return 1
-  fi
-}
-
-unsecure_site() {
-  local site_name="$1"
-
-  if ! command -v herd >/dev/null 2>&1; then
-    return 0
-  fi
-
-  info "Unsecuring site ${C_CYAN}$site_name${C_RESET}"
-  if herd unsecure "$site_name" >/dev/null 2>&1; then
-    ok "Site unsecured"
-  else
-    # Site might not be secured, which is fine
-    dim "  💡 Site was not secured or already unsecured"
-  fi
-
-  # Clean up Herd nginx configs and certificates to prevent stale config issues
-  cleanup_herd_site "$site_name"
-}
-
-# Remove stale Herd nginx configs and certificates for a site
-# This prevents nginx from failing to start due to missing certificate files
-cleanup_herd_site() {
-  local site_name="$1"
-  local site_domain="${site_name}.test"
-  local nginx_config="$HERD_CONFIG/valet/Nginx/$site_domain"
-  local cert_dir="$HERD_CONFIG/valet/Certificates"
-  local cleaned=false
-
-  # Remove nginx config if it exists
-  if [[ -f "$nginx_config" ]]; then
-    /bin/rm -f "$nginx_config" 2>/dev/null && cleaned=true
-  fi
-
-  # Remove certificate files (crt, key, csr, conf)
-  for ext in crt key csr conf; do
-    local cert_file="$cert_dir/${site_domain}.${ext}"
-    if [[ -f "$cert_file" ]]; then
-      /bin/rm -f "$cert_file" 2>/dev/null && cleaned=true
-    fi
-  done
-
-  if [[ "$cleaned" == true ]]; then
-    dim "  💡 Cleaned up Herd nginx config and certificates"
-  fi
-}
+# 04-git.sh - Git operations and repository helpers
 
 ensure_bare_repo() {
   local git_dir="$1"
@@ -677,6 +523,20 @@ select_branch_fzf() {
   [[ -n "$branches" ]] || die "No worktrees found for $repo"
 
   print -r -- "$branches" | fzf --prompt="$prompt: " --height=40% --reverse
+}
+
+# Interactive repo selection with fzf
+select_repo_fzf() {
+  local prompt="${1:-Select repository}"
+
+  if ! command -v fzf >/dev/null 2>&1; then
+    die "fzf not installed. Install with: brew install fzf"
+  fi
+
+  local repos; repos="$(list_repos)"
+  [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
+
+  print -r -- "$repos" | fzf --prompt="$prompt: " --height=40% --reverse
 }
 
 # Get ahead/behind counts for a branch
@@ -774,6 +634,361 @@ is_branch_merged() {
   return 1
 }
 
+# Collect worktrees for a repo into an array
+# Usage: collect_worktrees "$git_dir" worktrees_array
+collect_worktrees() {
+  local git_dir="$1"
+  local -n result_array="$2"
+  result_array=()
+
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || return 0
+
+  local path="" branch="" line=""
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      if [[ -n "$path" && -n "$branch" && "$path" != *.git ]]; then
+        result_array+=("$path|$branch")
+      fi
+      path=""
+      branch=""
+      continue
+    fi
+    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
+  done <<< "$out"
+
+  # Handle last entry
+  if [[ -n "$path" && -n "$branch" && "$path" != *.git ]]; then
+    result_array+=("$path|$branch")
+  fi
+}
+
+# 05-database.sh - Database and Herd operations
+
+db_name_for() {
+  local repo="$1"
+  local branch="$2"
+  local slug; slug="$(slugify_branch "$branch")"
+  # Replace dashes with underscores for MySQL compatibility
+  local db_name="${repo}__${slug}"
+  db_name="${db_name//-/_}"
+
+  # MySQL database name limit is 64 characters
+  if (( ${#db_name} > 64 )); then
+    # Truncate and add hash suffix for uniqueness
+    local hash; hash="$(print -r -- "$slug" | md5 | cut -c1-8)"
+    local max_repo_len=$((64 - 11))  # Leave room for __<8-char-hash>
+    local truncated_repo="${repo:0:$max_repo_len}"
+    db_name="${truncated_repo}__${hash}"
+    db_name="${db_name//-/_}"
+  fi
+
+  print -r -- "$db_name"
+}
+
+create_database() {
+  local db_name="$1"
+
+  if [[ "$DB_CREATE" != "true" ]]; then
+    dim "  Database creation disabled (WT_DB_CREATE=false)"
+    return 0
+  fi
+
+  if ! command -v mysql >/dev/null 2>&1; then
+    warn "MySQL client not found - skipping database creation"
+    dim "  Create manually: CREATE DATABASE \`$db_name\`;"
+    return 0
+  fi
+
+  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  if [[ -n "$DB_PASSWORD" ]]; then
+    mysql_cmd+=(-p"$DB_PASSWORD")
+  fi
+
+  info "Creating database ${C_CYAN}$db_name${C_RESET}"
+
+  if "${mysql_cmd[@]}" -e "CREATE DATABASE IF NOT EXISTS \`$db_name\`;" 2>/dev/null; then
+    ok "Database created: $db_name"
+    return 0
+  else
+    warn "Could not create database - check MySQL connection"
+    dim "  Create manually: CREATE DATABASE \`$db_name\`;"
+    return 1
+  fi
+}
+
+backup_database() {
+  local db_name="$1"
+  local repo="$2"
+
+  if [[ "$DB_BACKUP" != "true" ]]; then
+    dim "  Database backup disabled (WT_DB_BACKUP=false)"
+    return 0
+  fi
+
+  if ! command -v mysqldump >/dev/null 2>&1; then
+    warn "mysqldump not found - skipping database backup"
+    return 0
+  fi
+
+  # Check if database exists
+  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  if [[ -n "$DB_PASSWORD" ]]; then
+    mysql_cmd+=(-p"$DB_PASSWORD")
+  fi
+
+  if ! "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
+    dim "  Database $db_name does not exist - skipping backup"
+    return 0
+  fi
+
+  # Create backup directory
+  local backup_dir="$DB_BACKUP_DIR/$repo"
+  mkdir -p "$backup_dir" || { warn "Could not create backup directory: $backup_dir"; return 1; }
+
+  # Generate backup filename with timestamp
+  local timestamp; timestamp="$(date +%Y%m%d_%H%M%S)"
+  local backup_file="$backup_dir/${db_name}_${timestamp}.sql"
+
+  local mysqldump_cmd=(mysqldump -h "$DB_HOST" -u "$DB_USER")
+  if [[ -n "$DB_PASSWORD" ]]; then
+    mysqldump_cmd+=(-p"$DB_PASSWORD")
+  fi
+
+  info "Backing up database ${C_CYAN}$db_name${C_RESET}"
+
+  if "${mysqldump_cmd[@]}" "$db_name" > "$backup_file" 2>/dev/null; then
+    ok "Database backed up: ${C_DIM}$backup_file${C_RESET}"
+    return 0
+  else
+    warn "Could not backup database"
+    rm -f "$backup_file" 2>/dev/null
+    return 1
+  fi
+}
+
+drop_database() {
+  local db_name="$1"
+
+  if ! command -v mysql >/dev/null 2>&1; then
+    warn "MySQL client not found - cannot drop database"
+    return 1
+  fi
+
+  local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER")
+  if [[ -n "$DB_PASSWORD" ]]; then
+    mysql_cmd+=(-p"$DB_PASSWORD")
+  fi
+
+  # Check if database exists
+  if ! "${mysql_cmd[@]}" -e "USE \`$db_name\`;" 2>/dev/null; then
+    dim "  Database $db_name does not exist"
+    return 0
+  fi
+
+  info "Dropping database ${C_CYAN}$db_name${C_RESET}"
+
+  if "${mysql_cmd[@]}" -e "DROP DATABASE \`$db_name\`;" 2>/dev/null; then
+    ok "Database dropped: $db_name"
+    return 0
+  else
+    warn "Could not drop database"
+    return 1
+  fi
+}
+
+unsecure_site() {
+  local site_name="$1"
+
+  if ! command -v herd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  info "Unsecuring site ${C_CYAN}$site_name${C_RESET}"
+  if herd unsecure "$site_name" >/dev/null 2>&1; then
+    ok "Site unsecured"
+  else
+    # Site might not be secured, which is fine
+    dim "  Site was not secured or already unsecured"
+  fi
+
+  # Clean up Herd nginx configs and certificates to prevent stale config issues
+  cleanup_herd_site "$site_name"
+}
+
+# Remove stale Herd nginx configs and certificates for a site
+# This prevents nginx from failing to start due to missing certificate files
+cleanup_herd_site() {
+  local site_name="$1"
+  local site_domain="${site_name}.test"
+  local nginx_config="$HERD_CONFIG/valet/Nginx/$site_domain"
+  local cert_dir="$HERD_CONFIG/valet/Certificates"
+  local cleaned=false
+
+  # Remove nginx config if it exists
+  if [[ -f "$nginx_config" ]]; then
+    /bin/rm -f "$nginx_config" 2>/dev/null && cleaned=true
+  fi
+
+  # Remove certificate files (crt, key, csr, conf)
+  for ext in crt key csr conf; do
+    local cert_file="$cert_dir/${site_domain}.${ext}"
+    if [[ -f "$cert_file" ]]; then
+      /bin/rm -f "$cert_file" 2>/dev/null && cleaned=true
+    fi
+  done
+
+  if [[ "$cleaned" == true ]]; then
+    dim "  Cleaned up Herd nginx config and certificates"
+  fi
+}
+
+# 06-hooks.sh - Hook system for extensible worktree setup
+
+# Verify hook file is safe to execute (owned by current user, not world-writable)
+verify_hook_security() {
+  local hook_file="$1"
+  local current_uid; current_uid="$(id -u)"
+
+  # Check ownership (macOS stat format)
+  local file_owner; file_owner="$(stat -f %u "$hook_file" 2>/dev/null)"
+  if [[ "$file_owner" != "$current_uid" ]]; then
+    warn "Hook '$hook_file' is not owned by current user - skipping for security"
+    return 1
+  fi
+
+  # Check for world-writable (macOS: last digit of octal perms)
+  local file_perms; file_perms="$(stat -f %Lp "$hook_file" 2>/dev/null)"
+  if [[ "${file_perms: -1}" =~ [2367] ]]; then
+    warn "Hook '$hook_file' is world-writable - skipping for security"
+    return 1
+  fi
+
+  return 0
+}
+
+# Run hooks for a given event
+# Usage: run_hooks <hook_name> <repo> <branch> <wt_path> <app_url> <db_name>
+# Example: run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
+run_hooks() {
+  local hook_name="$1"
+  local repo="$2"
+  local branch="$3"
+  local wt_path="$4"
+  local app_url="$5"
+  local db_name="$6"
+
+  # Check if hooks directory exists
+  [[ -d "$WT_HOOKS_DIR" ]] || return 0
+
+  local hook_file="$WT_HOOKS_DIR/$hook_name"
+
+  # Check if hook exists and is executable
+  if [[ -x "$hook_file" ]]; then
+    # Security check before executing
+    if ! verify_hook_security "$hook_file"; then
+      return 0
+    fi
+
+    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
+
+    # Export environment variables for the hook
+    (
+      export WT_REPO="$repo"
+      export WT_BRANCH="$branch"
+      export WT_PATH="$wt_path"
+      export WT_URL="$app_url"
+      export WT_DB_NAME="$db_name"
+      export WT_HOOK_NAME="$hook_name"
+      # Control flags for hooks
+      [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+      [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
+
+      # Run hook from the worktree directory
+      cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+      if "$hook_file"; then
+        ok "Hook ${C_CYAN}$hook_name${C_RESET} completed"
+      else
+        warn "Hook ${C_CYAN}$hook_name${C_RESET} exited with non-zero status"
+      fi
+    )
+  elif [[ -f "$hook_file" ]]; then
+    dim "  Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
+  fi
+
+  # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks)
+  local hooks_d="$WT_HOOKS_DIR/${hook_name}.d"
+  if [[ -d "$hooks_d" ]]; then
+    # Run global hooks (files only, not directories)
+    for hook_script in "$hooks_d"/*(N.x); do
+      # Security check before executing
+      if ! verify_hook_security "$hook_script"; then
+        continue
+      fi
+
+      local script_name="${hook_script:t}"
+      info "Running ${C_CYAN}$hook_name.d/$script_name${C_RESET}..."
+
+      (
+        export WT_REPO="$repo"
+        export WT_BRANCH="$branch"
+        export WT_PATH="$wt_path"
+        export WT_URL="$app_url"
+        export WT_DB_NAME="$db_name"
+        export WT_HOOK_NAME="$hook_name"
+        [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+        [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
+
+        cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+        if "$hook_script"; then
+          ok "  $script_name completed"
+        else
+          warn "  $script_name exited with non-zero status"
+        fi
+      )
+    done
+
+    # Run repo-specific hooks (from subdirectory matching repo name)
+    local repo_hooks_d="$hooks_d/$repo"
+    if [[ -d "$repo_hooks_d" ]]; then
+      for hook_script in "$repo_hooks_d"/*(N.x); do
+        # Security check before executing
+        if ! verify_hook_security "$hook_script"; then
+          continue
+        fi
+
+        local script_name="${hook_script:t}"
+        info "Running ${C_CYAN}$hook_name.d/$repo/$script_name${C_RESET}..."
+
+        (
+          export WT_REPO="$repo"
+          export WT_BRANCH="$branch"
+          export WT_PATH="$wt_path"
+          export WT_URL="$app_url"
+          export WT_DB_NAME="$db_name"
+          export WT_HOOK_NAME="$hook_name"
+          [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+          [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
+
+          cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+          if "$hook_script"; then
+            ok "  $repo/$script_name completed"
+          else
+            warn "  $repo/$script_name exited with non-zero status"
+          fi
+        )
+      done
+    fi
+  fi
+
+  return 0
+}
+
+# 07-templates.sh - Template loading and listing
+
 # Validate template name (security: prevent path traversal)
 validate_template_name() {
   local name="$1"
@@ -791,8 +1006,6 @@ validate_template_name() {
   fi
 }
 
-# Load a template file and export its WT_SKIP_* variables
-# Template format: key=value (like .wtrc)
 # Find similar names for "did you mean?" suggestions
 # Usage: suggest_similar <input> <type> <list_of_options>
 # Returns the closest match or empty string
@@ -919,7 +1132,7 @@ load_template() {
     esac
   done < "$template_file"
 
-  dim "  📋 Applied template: $template_name"
+  dim "  Applied template: $template_name"
 }
 
 # List available templates
@@ -1001,151 +1214,463 @@ format_json() {
   print -r -- "$result"
 }
 
-# Verify hook file is safe to execute (owned by current user, not world-writable)
-verify_hook_security() {
-  local hook_file="$1"
-  local current_uid; current_uid="$(id -u)"
+# 08-spinner.sh - Progress indicators for long operations
 
-  # Check ownership (macOS stat format)
-  local file_owner; file_owner="$(stat -f %u "$hook_file" 2>/dev/null)"
-  if [[ "$file_owner" != "$current_uid" ]]; then
-    warn "Hook '$hook_file' is not owned by current user - skipping for security"
-    return 1
-  fi
+# Spinner characters (Braille pattern for smooth animation)
+readonly SPINNER_CHARS='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+readonly SPINNER_DELAY=0.08
 
-  # Check for world-writable (macOS: last digit of octal perms)
-  local file_perms; file_perms="$(stat -f %Lp "$hook_file" 2>/dev/null)"
-  if [[ "${file_perms: -1}" =~ [2367] ]]; then
-    warn "Hook '$hook_file' is world-writable - skipping for security"
-    return 1
-  fi
+# Spinner state
+typeset -g SPINNER_PID=""
+typeset -g SPINNER_MSG=""
 
-  return 0
+# Start a spinner in the background
+# Usage: spinner_start "Installing dependencies..."
+spinner_start() {
+  local msg="$1"
+  SPINNER_MSG="$msg"
+
+  # Don't show spinner if not a TTY or in quiet mode
+  [[ -t 1 && "$QUIET" != true ]] || return 0
+
+  # Kill any existing spinner
+  spinner_stop 2>/dev/null || true
+
+  (
+    local i=0
+    local chars_len=${#SPINNER_CHARS}
+    while true; do
+      local char="${SPINNER_CHARS:$i:1}"
+      printf "\r${C_CYAN}%s${C_RESET} %s" "$char" "$msg" >&2
+      i=$(( (i + 1) % chars_len ))
+      sleep "$SPINNER_DELAY"
+    done
+  ) &
+  SPINNER_PID=$!
+  disown $SPINNER_PID 2>/dev/null || true
 }
 
-# Run hooks for a given event
-# Usage: run_hooks <hook_name> <repo> <branch> <wt_path> <app_url> <db_name>
-# Example: run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
-run_hooks() {
-  local hook_name="$1"
-  local repo="$2"
-  local branch="$3"
-  local wt_path="$4"
-  local app_url="$5"
-  local db_name="$6"
+# Stop spinner and show result
+# Usage: spinner_stop "ok" or spinner_stop "fail" or spinner_stop "skip"
+spinner_stop() {
+  local result="${1:-ok}"
 
-  # Check if hooks directory exists
-  [[ -d "$WT_HOOKS_DIR" ]] || return 0
+  # Kill spinner process
+  if [[ -n "$SPINNER_PID" ]]; then
+    kill "$SPINNER_PID" 2>/dev/null || true
+    wait "$SPINNER_PID" 2>/dev/null || true
+    SPINNER_PID=""
+  fi
 
-  local hook_file="$WT_HOOKS_DIR/$hook_name"
+  [[ -t 1 && "$QUIET" != true ]] || return 0
 
-  # Check if hook exists and is executable
-  if [[ -x "$hook_file" ]]; then
-    # Security check before executing
-    if ! verify_hook_security "$hook_file"; then
+  # Clear spinner line
+  printf "\r\033[K" >&2
+
+  # Show result
+  case "$result" in
+    ok)   print -r -- "${C_GREEN}✔${C_RESET} $SPINNER_MSG" ;;
+    fail) print -r -- "${C_RED}✖${C_RESET} $SPINNER_MSG" ;;
+    skip) print -r -- "${C_DIM}○${C_RESET} $SPINNER_MSG ${C_DIM}(skipped)${C_RESET}" ;;
+  esac
+
+  SPINNER_MSG=""
+}
+
+# Run a command with spinner
+# Usage: with_spinner "Installing npm packages" npm install
+# Returns the exit code of the command
+with_spinner() {
+  local msg="$1"
+  shift
+
+  spinner_start "$msg"
+
+  local exit_code=0
+  if "$@" >/dev/null 2>&1; then
+    spinner_stop "ok"
+  else
+    exit_code=$?
+    spinner_stop "fail"
+  fi
+
+  return $exit_code
+}
+
+# Step progress indicator for multi-step operations
+# Usage: step_progress 1 5 "Installing dependencies"
+step_progress() {
+  local current="$1" total="$2" msg="$3"
+  [[ -t 1 && "$QUIET" != true ]] || return 0
+  printf "\r${C_DIM}[%d/%d]${C_RESET} %s" "$current" "$total" "$msg" >&2
+}
+
+# Clear step progress line
+step_complete() {
+  [[ -t 1 && "$QUIET" != true ]] || return 0
+  printf "\r\033[K" >&2
+}
+
+# Ensure spinner is stopped on script exit
+trap 'spinner_stop 2>/dev/null' EXIT INT TERM
+
+# 09-parallel.sh - Parallel execution framework
+
+# Report results helper
+report_results() {
+  local success="$1" failed="$2" total="$3"
+
+  print -r -- ""
+  if (( failed == 0 )); then
+    ok "All $total operation(s) completed successfully"
+  else
+    warn "$failed of $total operation(s) failed"
+  fi
+}
+
+# Run operations in parallel with result collection
+# Usage: parallel_run <result_handler> <operations...>
+# Each operation is: "label|command"
+parallel_run() {
+  local result_handler="$1"
+  shift
+  local operations=("$@")
+
+  local total=${#operations[@]}
+  [[ $total -eq 0 ]] && return 0
+
+  # Create temp directory for results
+  local tmpdir; tmpdir="$(/usr/bin/mktemp -d)"
+  trap "/bin/rm -rf '$tmpdir'" EXIT
+
+  # Job tracking
+  local pids=()
+  local running=0
+
+  info "Running $total operation(s) in parallel (max $WT_MAX_PARALLEL concurrent)..."
+
+  local i=0
+  for op in "${operations[@]}"; do
+    i=$((i + 1))
+    local label="${op%%|*}"
+    local cmd="${op#*|}"
+
+    # Wait if at max parallel
+    while (( running >= WT_MAX_PARALLEL )); do
+      local new_pids=()
+      for pid in "${pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+          new_pids+=("$pid")
+        else
+          wait "$pid" 2>/dev/null || true
+          running=$((running - 1))
+        fi
+      done
+      pids=("${new_pids[@]}")
+      (( running >= WT_MAX_PARALLEL )) && sleep 0.1
+    done
+
+    # Launch job
+    (
+      if eval "$cmd" >/dev/null 2>&1; then
+        echo "ok|$label" > "$tmpdir/$i"
+      else
+        echo "fail|$label" > "$tmpdir/$i"
+      fi
+    ) &
+    pids+=($!)
+    running=$((running + 1))
+  done
+
+  # Wait for remaining jobs
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+
+  # Collect and report results
+  local success=0 failed=0
+  i=0
+  for op in "${operations[@]}"; do
+    i=$((i + 1))
+    if [[ -f "$tmpdir/$i" ]]; then
+      local result; result="$(<"$tmpdir/$i")"
+      local status="${result%%|*}"
+      local label="${result#*|}"
+
+      if [[ "$status" == "ok" ]]; then
+        ok "  $label"
+        success=$((success + 1))
+      else
+        warn "  $label - failed"
+        failed=$((failed + 1))
+      fi
+    fi
+  done
+
+  /bin/rm -rf "$tmpdir"
+  trap - EXIT
+
+  # Call result handler
+  "$result_handler" "$success" "$failed" "$total"
+
+  return $(( failed > 0 ? 1 : 0 ))
+}
+
+# 10-interactive.sh - Interactive worktree creation wizard
+
+# Interactive worktree creation
+# Usage: interactive_add [repo]
+interactive_add() {
+  local initial_repo="${1:-}"
+
+  # Ensure fzf is available
+  if ! command -v fzf >/dev/null 2>&1; then
+    die "Interactive mode requires fzf. Install with: brew install fzf"
+  fi
+
+  print -r -- ""
+  print -r -- "${C_BOLD}🌳 Interactive Worktree Creation${C_RESET}"
+  print -r -- ""
+
+  # Step 1: Repository selection
+  local repo="$initial_repo"
+  if [[ -z "$repo" ]]; then
+    print -r -- "${C_BOLD}Step 1/5:${C_RESET} Select repository"
+    local repos; repos="$(list_repos)"
+    [[ -n "$repos" ]] || die "No repositories found in $HERD_ROOT"
+
+    repo="$(echo "$repos" | fzf --prompt="Repository: " --height=40% --reverse)"
+    [[ -n "$repo" ]] || die "No repository selected"
+  fi
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+  load_repo_config "$git_dir"
+
+  ok "Repository: ${C_CYAN}$repo${C_RESET}"
+  print -r -- ""
+
+  # Step 2: Base branch selection
+  print -r -- "${C_BOLD}Step 2/5:${C_RESET} Select base branch"
+
+  # Fetch first
+  with_spinner "Fetching branches" git --git-dir="$git_dir" fetch --all --prune --quiet
+
+  # Get remote branches for selection
+  local branches; branches="$(git --git-dir="$git_dir" branch -r --format='%(refname:short)' 2>/dev/null | grep -v HEAD)"
+
+  local base
+  base="$(echo "$branches" | fzf --prompt="Base branch: " --height=40% --reverse --query="origin/staging")"
+  [[ -n "$base" ]] || base="$DEFAULT_BASE"
+
+  ok "Base: ${C_DIM}$base${C_RESET}"
+  print -r -- ""
+
+  # Step 3: Branch name input with live preview
+  print -r -- "${C_BOLD}Step 3/5:${C_RESET} Enter new branch name"
+  print -r -- "${C_DIM}  (e.g., feature/my-feature, bugfix/fix-123)${C_RESET}"
+  print -r -- ""
+
+  local branch=""
+  while [[ -z "$branch" ]]; do
+    print -n "  Branch name: "
+    read -r branch
+
+    if [[ -z "$branch" ]]; then
+      warn "Branch name required"
+      continue
+    fi
+
+    # Validate
+    if ! validate_name "$branch" "branch" 2>/dev/null; then
+      warn "Invalid branch name"
+      branch=""
+      continue
+    fi
+
+    # Check if already exists
+    if git --git-dir="$git_dir" show-ref --quiet "refs/heads/$branch" 2>/dev/null; then
+      warn "Branch already exists: $branch"
+      branch=""
+      continue
+    fi
+  done
+
+  # Show preview
+  local wt_path; wt_path="$(wt_path_for "$repo" "$branch")"
+  local app_url; app_url="$(url_for "$repo" "$branch")"
+  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+
+  print -r -- ""
+  print -r -- "  ${C_DIM}Preview:${C_RESET}"
+  print -r -- "    Path:     ${C_CYAN}$wt_path${C_RESET}"
+  print -r -- "    URL:      ${C_BLUE}$app_url${C_RESET}"
+  print -r -- "    Database: ${C_CYAN}$db_name${C_RESET}"
+  print -r -- ""
+
+  # Step 4: Template selection (optional)
+  print -r -- "${C_BOLD}Step 4/5:${C_RESET} Select template ${C_DIM}(optional)${C_RESET}"
+
+  local template=""
+  local templates; templates="$(get_template_names)"
+
+  if [[ -n "$templates" ]]; then
+    # Add "none" option
+    templates="(none)
+$templates"
+
+    template="$(echo "$templates" | fzf --prompt="Template: " --height=40% --reverse)"
+
+    if [[ "$template" != "(none)" && -n "$template" ]]; then
+      WT_TEMPLATE="$template"
+      ok "Template: ${C_CYAN}$template${C_RESET}"
+    else
+      dim "  No template selected"
+    fi
+  else
+    dim "  No templates available"
+  fi
+  print -r -- ""
+
+  # Step 5: Confirmation
+  print -r -- "${C_BOLD}Step 5/5:${C_RESET} Confirm"
+  print -r -- ""
+  print -r -- "  ${C_BOLD}Summary:${C_RESET}"
+  print -r -- "    Repository: ${C_CYAN}$repo${C_RESET}"
+  print -r -- "    Branch:     ${C_MAGENTA}$branch${C_RESET}"
+  print -r -- "    Base:       ${C_DIM}$base${C_RESET}"
+  print -r -- "    Path:       $wt_path"
+  print -r -- "    URL:        ${C_BLUE}$app_url${C_RESET}"
+  [[ -n "$WT_TEMPLATE" ]] && print -r -- "    Template:   ${C_CYAN}$WT_TEMPLATE${C_RESET}"
+  print -r -- ""
+
+  print -n "  ${C_GREEN}Create worktree? [Y/n]${C_RESET} "
+  local response; read -r response
+
+  if [[ "$response" =~ ^[Nn]$ ]]; then
+    dim "Aborted"
+    return 0
+  fi
+
+  print -r -- ""
+
+  # Execute creation (call cmd_add with collected params)
+  INTERACTIVE=false  # Disable interactive mode for actual creation
+  cmd_add "$repo" "$branch" "$base"
+}
+
+# 11-resilience.sh - Retry logic, transactions, disk checks, lock cleanup
+
+# Retry a command with exponential backoff
+# Usage: with_retry <max_attempts> <command...>
+with_retry() {
+  local max_attempts="$1"
+  shift
+
+  local attempt=1
+  local delay=1
+
+  while (( attempt <= max_attempts )); do
+    if "$@"; then
       return 0
     fi
 
-    info "Running ${C_CYAN}$hook_name${C_RESET} hook..."
-
-    # Export environment variables for the hook
-    (
-      export WT_REPO="$repo"
-      export WT_BRANCH="$branch"
-      export WT_PATH="$wt_path"
-      export WT_URL="$app_url"
-      export WT_DB_NAME="$db_name"
-      export WT_HOOK_NAME="$hook_name"
-      # Control flags for hooks
-      [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
-      [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
-
-      # Run hook from the worktree directory
-      cd "$wt_path" 2>/dev/null || cd "$HOME"
-
-      if "$hook_file"; then
-        ok "Hook ${C_CYAN}$hook_name${C_RESET} completed"
-      else
-        warn "Hook ${C_CYAN}$hook_name${C_RESET} exited with non-zero status"
-      fi
-    )
-  elif [[ -f "$hook_file" ]]; then
-    dim "  💡 Hook $hook_name exists but is not executable. Run: chmod +x $hook_file"
-  fi
-
-  # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks)
-  local hooks_d="$WT_HOOKS_DIR/${hook_name}.d"
-  if [[ -d "$hooks_d" ]]; then
-    # Run global hooks (files only, not directories)
-    for hook_script in "$hooks_d"/*(N.x); do
-      # Security check before executing
-      if ! verify_hook_security "$hook_script"; then
-        continue
-      fi
-
-      local script_name="${hook_script:t}"
-      info "Running ${C_CYAN}$hook_name.d/$script_name${C_RESET}..."
-
-      (
-        export WT_REPO="$repo"
-        export WT_BRANCH="$branch"
-        export WT_PATH="$wt_path"
-        export WT_URL="$app_url"
-        export WT_DB_NAME="$db_name"
-        export WT_HOOK_NAME="$hook_name"
-        [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
-        [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
-
-        cd "$wt_path" 2>/dev/null || cd "$HOME"
-
-        if "$hook_script"; then
-          ok "  $script_name completed"
-        else
-          warn "  $script_name exited with non-zero status"
-        fi
-      )
-    done
-
-    # Run repo-specific hooks (from subdirectory matching repo name)
-    local repo_hooks_d="$hooks_d/$repo"
-    if [[ -d "$repo_hooks_d" ]]; then
-      for hook_script in "$repo_hooks_d"/*(N.x); do
-        # Security check before executing
-        if ! verify_hook_security "$hook_script"; then
-          continue
-        fi
-
-        local script_name="${hook_script:t}"
-        info "Running ${C_CYAN}$hook_name.d/$repo/$script_name${C_RESET}..."
-
-        (
-          export WT_REPO="$repo"
-          export WT_BRANCH="$branch"
-          export WT_PATH="$wt_path"
-          export WT_URL="$app_url"
-          export WT_DB_NAME="$db_name"
-          export WT_HOOK_NAME="$hook_name"
-          [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
-          [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
-
-          cd "$wt_path" 2>/dev/null || cd "$HOME"
-
-          if "$hook_script"; then
-            ok "  $repo/$script_name completed"
-          else
-            warn "  $repo/$script_name exited with non-zero status"
-          fi
-        )
-      done
+    if (( attempt < max_attempts )); then
+      dim "  Attempt $attempt failed, retrying in ${delay}s..."
+      sleep "$delay"
+      delay=$((delay * 2))
     fi
-  fi
 
-  return 0
+    attempt=$((attempt + 1))
+  done
+
+  return 1
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# COMMANDS
-# ─────────────────────────────────────────────────────────────────────────────
+# Check for and optionally clean git index locks
+# Usage: check_index_locks <git_dir> [--auto-clean]
+check_index_locks() {
+  local git_dir="$1"
+  local auto_clean="${2:-}"
+  local locks_found=0
+
+  local worktrees_dir="$git_dir/worktrees"
+  [[ -d "$worktrees_dir" ]] || return 0
+
+  for lock_file in "$worktrees_dir"/*/index.lock(N); do
+    [[ -f "$lock_file" ]] || continue
+
+    # Check if lock is stale (older than 5 minutes and no git process)
+    local lock_age=$(($(date +%s) - $(stat -f %m "$lock_file" 2>/dev/null || echo 0)))
+    if (( lock_age > 300 )); then
+      if [[ "$auto_clean" == "--auto-clean" ]]; then
+        rm -f "$lock_file"
+        dim "  Removed stale lock: ${lock_file##*/worktrees/}"
+      else
+        warn "Stale lock found: ${lock_file##*/worktrees/}"
+        locks_found=$((locks_found + 1))
+      fi
+    fi
+  done
+
+  return $locks_found
+}
+
+# Check available disk space
+# Usage: check_disk_space <path> <min_mb>
+check_disk_space() {
+  local path="$1"
+  local min_mb="${2:-1024}"  # Default 1GB
+
+  local available_kb
+  available_kb=$(df -k "$path" 2>/dev/null | tail -1 | awk '{print $4}')
+  local available_mb=$((available_kb / 1024))
+
+  if (( available_mb < min_mb )); then
+    die "Insufficient disk space: ${available_mb}MB available, ${min_mb}MB required"
+  fi
+}
+
+# Transaction state
+typeset -g WT_TRANSACTION_ACTIVE=false
+typeset -g WT_ROLLBACK_STEPS=()
+
+# Start a transaction
+transaction_start() {
+  WT_TRANSACTION_ACTIVE=true
+  WT_ROLLBACK_STEPS=()
+  trap 'transaction_rollback' EXIT INT TERM
+}
+
+# Register rollback step
+transaction_register() {
+  WT_ROLLBACK_STEPS+=("$1")
+}
+
+# Commit transaction (disable rollback)
+transaction_commit() {
+  WT_TRANSACTION_ACTIVE=false
+  WT_ROLLBACK_STEPS=()
+  trap - EXIT INT TERM
+}
+
+# Rollback on failure
+transaction_rollback() {
+  [[ "$WT_TRANSACTION_ACTIVE" == true ]] || return 0
+
+  warn "Rolling back failed operation..."
+
+  # Execute rollback steps in reverse order
+  local i
+  for ((i=${#WT_ROLLBACK_STEPS[@]}-1; i>=0; i--)); do
+    local step="${WT_ROLLBACK_STEPS[$i]}"
+    eval "$step" 2>/dev/null || true
+  done
+
+  WT_TRANSACTION_ACTIVE=false
+}
+
+# lifecycle.sh - Worktree creation and removal commands
 
 cmd_add() {
   local repo="${1:-}"; local branch="${2:-}"; local base="${3:-}"
@@ -1175,7 +1700,7 @@ cmd_add() {
   # Dry-run mode - show what would happen without executing
   if [[ "$DRY_RUN" == true ]]; then
     print -r -- ""
-    print -r -- "${C_BOLD}🔍 Dry Run Preview${C_RESET}"
+    print -r -- "${C_BOLD}Dry Run Preview${C_RESET}"
     print -r -- ""
     print -r -- "${C_BOLD}Worktree Details:${C_RESET}"
     print -r -- "  Repository:  ${C_CYAN}$repo${C_RESET}"
@@ -1214,7 +1739,6 @@ cmd_add() {
   git --git-dir="$git_dir" fetch --all --prune --quiet
 
   # If base is a remote ref (origin/...), explicitly fetch it to ensure we have the latest
-  # This handles branches with slashes and ensures the tracking ref is up-to-date
   if [[ "$base" == origin/* ]]; then
     local remote_branch="${base#origin/}"
     dim "  Fetching latest: $remote_branch"
@@ -1244,25 +1768,22 @@ cmd_add() {
     git --git-dir="$git_dir" worktree add "$wt_path" "$branch"
   else
     info "Creating branch ${C_MAGENTA}$branch${C_RESET} from ${C_DIM}$base${C_RESET}"
-    # Use --no-track to prevent auto-tracking the base branch
     git --git-dir="$git_dir" worktree add --no-track -b "$branch" "$wt_path" "$base"
   fi
 
-  # Set up proper remote tracking for the branch (track its own remote, not the base)
-  # Push to create remote branch and set tracking in one step
+  # Set up proper remote tracking for the branch
   info "Setting up remote tracking for ${C_MAGENTA}$branch${C_RESET}"
   if GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git -C "$wt_path" push -u origin "$branch:$branch" 2>/dev/null; then
     ok "Remote branch created and tracking set"
   else
-    dim "  💡 Push failed (may need to push manually later): git push -u origin $branch"
+    dim "  Push failed (may need to push manually later): git push -u origin $branch"
   fi
 
   # Success - disable cleanup trap
   cleanup_needed=false
   trap - EXIT
 
-  # Run post-add hooks (handles .env, database, composer, npm, etc.)
-  # See ~/.wt/hooks/post-add.d/ for customisation
+  # Run post-add hooks
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -1319,8 +1840,7 @@ cmd_rm() {
     fi
   fi
 
-  # Run pre-rm hooks (can abort by returning non-zero)
-  # Database backup is handled by pre-rm hooks - see ~/.wt/hooks/pre-rm.d/
+  # Run pre-rm hooks
   if ! run_hooks "pre-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"; then
     die "Pre-rm hook failed - aborting"
   fi
@@ -1341,271 +1861,161 @@ cmd_rm() {
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
 
-  # Run post-rm hooks (handles Herd unsecure, database drop, etc.)
-  # See ~/.wt/hooks/post-rm.d/ for customisation
+  # Run post-rm hooks
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   ok "Worktree removed"
   print -r -- ""
 }
 
-cmd_ls() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt ls [--json] <repo>"
+cmd_clone() {
+  local url="${1:-}"; local repo="${2:-}"; local initial_branch="${3:-}"
+  [[ -n "$url" ]] || die "Usage: wt clone <url> [repo-name] [branch]"
+
+  # Extract repo name from URL if not provided
+  if [[ -z "$repo" ]]; then
+    repo="${url##*/}"
+    repo="${repo%.git}"
+  fi
 
   validate_name "$repo" "repository"
+  [[ -z "$initial_branch" ]] || validate_name "$initial_branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
 
-  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+  [[ ! -d "$git_dir" ]] || die "Bare repo already exists at $git_dir"
 
-  local json_items=()
+  info "Cloning ${C_CYAN}$url${C_RESET} as bare repo..."
+  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git clone --bare "$url" "$git_dir"
 
-  display_worktree() {
-    local idx="$1" path="$2" branch="$3" head="$4"
-    local folder="${path:t}"
-    # Read APP_URL from .env if available, otherwise fall back to folder-based URL
-    local url
-    if [[ -f "$path/.env" ]]; then
-      url="$(grep -E '^APP_URL=' "$path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
-    fi
-    [[ -z "$url" ]] && url="https://${folder}.test"
-    local sha; sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || true)"
-    local st; st="$(git -C "$path" status --porcelain 2>/dev/null || true)"
-    local state_icon="●" state_color="$C_GREEN" state_text="clean"
-    local dirty=false
-    local mismatch=false
+  # Configure fetch to get all branches
+  /usr/bin/git --git-dir="$git_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 
-    if [[ -n "$st" ]]; then
-      local changes; changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
-      state_icon="◐"
-      state_color="$C_YELLOW"
-      state_text="$changes uncommitted"
-      dirty=true
-    fi
-
-    # Check for branch/directory mismatch
-    local match_result="" expected_slug=""
-    if [[ -n "$branch" ]]; then
-      match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
-      if [[ "$match_result" == mismatch\|* ]]; then
-        mismatch=true
-        expected_slug="${match_result#mismatch|}"
-      fi
-    fi
-
-    # Get ahead/behind
-    local counts; counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
-    local ahead="${counts%% *}" behind="${counts##* }"
-
-    if [[ "$JSON_OUTPUT" == true ]]; then
-      json_items+=("{\"path\": \"$(json_escape "$path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind, \"mismatch\": $mismatch}")
-    else
-      print -r -- "${C_BOLD}[$idx]${C_RESET} 📁 ${C_CYAN}$path${C_RESET}"
-      if [[ -n "$branch" ]]; then
-        print -r -- "    ${C_DIM}branch${C_RESET}  🌿 ${C_MAGENTA}$branch${C_RESET}"
-      else
-        [[ -n "$head" ]] && print -r -- "    ${C_DIM}head${C_RESET}    ${C_YELLOW}${head:0:12}${C_RESET} (detached)"
-      fi
-      [[ -n "$sha" ]] && print -r -- "    ${C_DIM}sha${C_RESET}     ${C_DIM}$sha${C_RESET}"
-      print -r -- "    ${C_DIM}state${C_RESET}   ${state_color}${state_icon} ${state_text}${C_RESET}"
-      if (( ahead > 0 || behind > 0 )); then
-        print -r -- "    ${C_DIM}sync${C_RESET}    ${C_GREEN}↑$ahead${C_RESET} ${C_RED}↓$behind${C_RESET}"
-      fi
-      print -r -- "    ${C_DIM}url${C_RESET}     🌐 ${C_BLUE}$url${C_RESET}"
-      print -r -- "    ${C_DIM}cd${C_RESET}      ${C_DIM}cd ${(q)path}${C_RESET}"
-      if [[ "$mismatch" == true ]]; then
-        print -r -- "    ${C_RED}⚠ MISMATCH${C_RESET} Directory name doesn't match branch!"
-        print -r -- "      ${C_DIM}Expected:${C_RESET} ${repo}--${expected_slug}"
-      fi
-      print -r -- ""
-    fi
-  }
-
-  local path="" branch="" head="" idx=0 line=""
-  while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      if [[ -n "$path" ]]; then
-        idx=$((idx + 1))
-        display_worktree "$idx" "$path" "$branch" "$head"
-      fi
-      path=""; branch=""; head=""
-      continue
-    fi
-
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
-    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
-    [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
-  done <<< "$out"
-
-  # Handle last entry (no trailing blank line)
-  if [[ -n "$path" ]]; then
-    idx=$((idx + 1))
-    display_worktree "$idx" "$path" "$branch" "$head"
-  fi
-
-  if [[ "$JSON_OUTPUT" == true ]]; then
-    format_json "[${(j:, :)json_items}]"
-  fi
-}
-
-cmd_status() {
-  local repo="${1:-}"
-  local stale_threshold=50
-  local inactive_days=30
-
-  [[ -n "$repo" ]] || die "Usage: wt status <repo>"
-
-  validate_name "$repo" "repository"
-
-  local git_dir
-  git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  info "Fetching latest..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet
-
-  local out
-  out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
-
-  # JSON output mode
-  local json_items=()
-
-  if [[ "$JSON_OUTPUT" != true ]]; then
-    print -r -- ""
-    print -r -- "${C_BOLD}📊 Worktree Status: ${C_CYAN}$repo${C_RESET}"
-    print -r -- ""
-    printf "  ${C_DIM}%-28s %-10s %-14s %-6s %-7s %-10s${C_RESET}\n" "BRANCH" "STATE" "SYNC" "AGE" "MERGED" "SHA"
-    print -r -- "  ${C_DIM}───────────────────────────────────────────────────────────────────────────────────${C_RESET}"
-  fi
-
-  local path="" branch="" head="" line=""
-  local sha st state_icon state_color changes counts ahead behind
-  local age age_days merged_icon sync_display is_stale is_inactive
-  local mismatches=()
-
-  # Helper to display a worktree row
-  display_status_row() {
-    local p="$1" b="$2"
-
-    sha="$(git -C "$p" rev-parse --short HEAD 2>/dev/null)" || sha="?"
-    st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
-    state_icon="●"
-    state_color="$C_GREEN"
-    is_stale=false
-    is_inactive=false
-
-    if [[ -n "$st" ]]; then
-      changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
-      state_icon="◐ $changes"
-      state_color="$C_YELLOW"
-    fi
-
-    # Check for mismatch
-    local match_result="$(check_branch_directory_match "$p" "$b" "$repo")"
-    if [[ "$match_result" == mismatch\|* ]]; then
-      local expected_slug="${match_result#mismatch|}"
-      mismatches+=("${p:t}|$b|$expected_slug")
-    fi
-
-    # Get sync status
-    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
-    ahead="${counts%% *}"
-    behind="${counts##* }"
-
-    # Check if stale (>50 commits behind)
-    if (( behind > stale_threshold )); then
-      is_stale=true
-      sync_display="${C_RED}↑$ahead ↓$behind 🔴${C_RESET}"
-    else
-      sync_display="↑$ahead ↓$behind"
-    fi
-
-    # Get age
-    age="$(get_last_commit_age "$p")"
-    age_days="$(get_commit_age_days "$p")"
-    if (( age_days > inactive_days )); then
-      is_inactive=true
-    fi
-
-    # Check if merged
-    if is_branch_merged "$p" "$DEFAULT_BASE"; then
-      merged_icon="${C_DIM}✓${C_RESET}"
-    else
-      merged_icon="${C_DIM}-${C_RESET}"
-    fi
-
-    # Apply row colouring for stale/inactive
-    local branch_display="${b:0:26}"
-    local age_display="$age"
-    if [[ "$is_stale" == true ]]; then
-      branch_display="${C_RED}${b:0:26}${C_RESET}"
-      state_color="$C_RED"
-    elif [[ "$is_inactive" == true ]]; then
-      age_display="${C_YELLOW}$age${C_RESET}"
-    fi
-
-    if [[ "$JSON_OUTPUT" == true ]]; then
-      local dirty=false
-      [[ -n "$st" ]] && dirty=true
-      local merged=false
-      is_branch_merged "$p" "$DEFAULT_BASE" && merged=true
-      json_items+=("{\"branch\": \"$(json_escape "$b")\", \"path\": \"$(json_escape "$p")\", \"sha\": \"$(json_escape "$sha")\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead, \"behind\": $behind, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}")
-    else
-      printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
-        "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
-    fi
-  }
-
-  while IFS= read -r line; do
-    if [[ -z "$line" ]]; then
-      # Skip bare repo entry (no branch) and process worktrees
-      if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-        display_status_row "$path" "$branch"
-      fi
-      path=""
-      branch=""
-      head=""
-      continue
-    fi
-
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
-    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
-    [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
-  done <<< "$out"
-
-  # Handle last entry
-  if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-    display_status_row "$path" "$branch"
-  fi
-
-  # JSON output
-  if [[ "$JSON_OUTPUT" == true ]]; then
-    format_json "[${(j:, :)json_items}]"
-    return 0
-  fi
-
-  # Show mismatch warnings
-  if (( ${#mismatches[@]} > 0 )); then
-    print -r -- ""
-    print -r -- "${C_RED}${C_BOLD}⚠ Branch/Directory Mismatches Detected:${C_RESET}"
-    for m in "${mismatches[@]}"; do
-      local dir="${m%%|*}"
-      local rest="${m#*|}"
-      local actual_branch="${rest%%|*}"
-      local expected_slug="${rest#*|}"
-      print -r -- "  ${C_YELLOW}$dir${C_RESET}"
-      print -r -- "    ${C_DIM}Current branch:${C_RESET}  ${C_MAGENTA}$actual_branch${C_RESET}"
-      print -r -- "    ${C_DIM}Expected dir:${C_RESET}    ${repo}--${expected_slug}"
-      print -r -- "    ${C_DIM}Fix:${C_RESET} Checkout correct branch or recreate worktree"
-    done
-  fi
+  info "Fetching all branches..."
+  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git --git-dir="$git_dir" fetch --all --prune
 
   print -r -- ""
+  ok "Bare repo created at ${C_CYAN}$git_dir${C_RESET}"
+
+  # If specific branch requested, create worktree for it
+  if [[ -n "$initial_branch" ]]; then
+    print -r -- ""
+    if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/$initial_branch"; then
+      info "Creating worktree for ${C_GREEN}$initial_branch${C_RESET}..."
+      cmd_add "$repo" "$initial_branch" "origin/$initial_branch"
+    else
+      local base_branch=""
+      if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
+        base_branch="origin/staging"
+      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
+        base_branch="origin/main"
+      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/master"; then
+        base_branch="origin/master"
+      else
+        die "Branch '$initial_branch' not found on remote and no default base branch available"
+      fi
+      info "Creating new branch ${C_GREEN}$initial_branch${C_RESET} from $base_branch..."
+      cmd_add "$repo" "$initial_branch" "$base_branch"
+    fi
+  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
+    print -r -- ""
+    info "Found staging branch - creating worktree..."
+    cmd_add "$repo" "staging" "origin/staging"
+  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
+    print -r -- ""
+    info "Found main branch - creating worktree..."
+    cmd_add "$repo" "main" "origin/main"
+  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/master"; then
+    print -r -- ""
+    info "Found master branch - creating worktree..."
+    cmd_add "$repo" "master" "origin/master"
+  else
+    dim "  Create a worktree with: wt add $repo <branch>"
+    print -r -- ""
+  fi
+
+  notify "wt clone" "Repository $repo cloned successfully"
 }
+
+cmd_fresh() {
+  local repo="${1:-}"; local branch="${2:-}"
+
+  # Auto-detect from current directory if no args
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    branch="$DETECTED_BRANCH"
+    dim "  Detected: $repo / $branch"
+  fi
+
+  # Handle fzf selection if branch not provided
+  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
+    validate_name "$repo" "repository"
+    branch="$(select_branch_fzf "$repo" "Select worktree to refresh")" || die "No branch selected"
+  fi
+
+  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt fresh [<repo> [<branch>]]
+       Run from within a worktree to auto-detect, or specify repo/branch."
+
+  validate_name "$repo" "repository"
+  validate_name "$branch" "branch"
+
+  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
+  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  pushd "$wt_path" >/dev/null || die "Failed to cd into $wt_path"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
+  print -r -- ""
+
+  # Run migrate:fresh --seed (with confirmation unless forced)
+  if [[ -f "artisan" ]]; then
+    if [[ "$FORCE" == false ]]; then
+      warn "This will DROP ALL TABLES in the database!"
+      print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
+      local response
+      read -r response
+      if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        warn "Skipping migrate:fresh"
+        popd >/dev/null
+        return 0
+      fi
+    fi
+
+    info "Running migrate:fresh --seed..."
+    if php artisan migrate:fresh --seed; then
+      ok "Database refreshed"
+    else
+      warn "migrate:fresh --seed failed"
+    fi
+  fi
+
+  # Run npm ci
+  if [[ -f "package.json" ]]; then
+    info "Running npm ci..."
+    if npm ci; then
+      ok "npm dependencies installed"
+    else
+      warn "npm ci failed"
+    fi
+
+    info "Running npm run build..."
+    if npm run build; then
+      ok "Assets built"
+    else
+      warn "npm run build failed"
+    fi
+  fi
+
+  popd >/dev/null
+
+  notify "wt fresh" "Completed for $repo / $branch"
+  print -r -- ""
+  ok "Fresh complete!"
+  print -r -- ""
+}
+
+# git-ops.sh - Git operation commands
 
 cmd_pull() {
   local repo="${1:-}"; local branch="${2:-}"
@@ -1662,7 +2072,7 @@ cmd_pull_all() {
   out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
   [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
 
-  # Collect worktrees first, then process outside the loop
+  # Collect worktrees first
   local worktrees=()
   local path="" branch="" line=""
 
@@ -1684,7 +2094,7 @@ cmd_pull_all() {
     worktrees+=("$path|$branch")
   fi
 
-  # Now pull each worktree in parallel
+  # Pull each worktree in parallel
   local total=${#worktrees[@]}
   local count=0 failed=0
   export GIT_SSH_COMMAND="/usr/bin/ssh"
@@ -1799,77 +2209,137 @@ cmd_sync() {
   run_hooks "post-sync" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 }
 
-cmd_clone() {
-  local url="${1:-}"; local repo="${2:-}"; local initial_branch="${3:-}"
-  [[ -n "$url" ]] || die "Usage: wt clone <url> [repo-name] [branch]"
-
-  # Extract repo name from URL if not provided
-  if [[ -z "$repo" ]]; then
-    repo="${url##*/}"
-    repo="${repo%.git}"
-  fi
+cmd_prune() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt prune <repo>"
 
   validate_name "$repo" "repository"
-  [[ -z "$initial_branch" ]] || validate_name "$initial_branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
 
-  [[ ! -d "$git_dir" ]] || die "Bare repo already exists at $git_dir"
+  info "Pruning stale worktrees..."
+  git --git-dir="$git_dir" worktree prune -v
 
-  info "Cloning ${C_CYAN}$url${C_RESET} as bare repo..."
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git clone --bare "$url" "$git_dir"
+  info "Looking for merged branches..."
 
-  # Configure fetch to get all branches
-  /usr/bin/git --git-dir="$git_dir" config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+  # Get list of branches that have been merged to staging/main
+  local merged; merged="$(git --git-dir="$git_dir" branch --merged origin/staging 2>/dev/null | grep -v 'staging\|main\|master' | tr -d ' ')" || merged=""
 
-  info "Fetching all branches..."
-  GIT_SSH_COMMAND="/usr/bin/ssh" /usr/bin/git --git-dir="$git_dir" fetch --all --prune
-
-  print -r -- ""
-  ok "Bare repo created at ${C_CYAN}$git_dir${C_RESET}"
-
-  # If specific branch requested, create worktree for it
-  if [[ -n "$initial_branch" ]]; then
+  if [[ -n "$merged" ]]; then
     print -r -- ""
-    # Check if it's a remote branch
-    if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/$initial_branch"; then
-      info "Creating worktree for ${C_GREEN}$initial_branch${C_RESET}..."
-      cmd_add "$repo" "$initial_branch" "origin/$initial_branch"
+    warn "The following branches appear to be merged:"
+    print -r -- "$merged" | while read -r b; do
+      [[ -n "$b" ]] && print -r -- "  ${C_DIM}$b${C_RESET}"
+    done
+    print -r -- ""
+
+    if [[ "$FORCE" == true ]]; then
+      print -r -- "$merged" | while read -r b; do
+        [[ -n "$b" ]] && git --git-dir="$git_dir" branch -D "$b" 2>/dev/null && ok "Deleted $b"
+      done
     else
-      # Branch doesn't exist on remote - create as new branch from default base
-      local base_branch=""
-      if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
-        base_branch="origin/staging"
-      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
-        base_branch="origin/main"
-      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/master"; then
-        base_branch="origin/master"
-      else
-        die "Branch '$initial_branch' not found on remote and no default base branch available"
-      fi
-      info "Creating new branch ${C_GREEN}$initial_branch${C_RESET} from $base_branch..."
-      cmd_add "$repo" "$initial_branch" "$base_branch"
+      dim "Run with -f to delete merged branches"
     fi
-  # Auto-create staging worktree if staging branch exists
-  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
-    print -r -- ""
-    info "Found staging branch - creating worktree..."
-    cmd_add "$repo" "staging" "origin/staging"
-  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
-    print -r -- ""
-    info "Found main branch - creating worktree..."
-    cmd_add "$repo" "main" "origin/main"
-  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/master"; then
-    print -r -- ""
-    info "Found master branch - creating worktree..."
-    cmd_add "$repo" "master" "origin/master"
   else
-    dim "  Create a worktree with: wt add $repo <branch>"
-    print -r -- ""
+    ok "No merged branches to clean up"
   fi
 
-  notify "wt clone" "Repository $repo cloned successfully"
+  ok "Prune complete"
 }
+
+cmd_log() {
+  local repo="${1:-}"; local branch="${2:-}"
+
+  # Auto-detect from current directory if no args
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    branch="$DETECTED_BRANCH"
+  fi
+
+  # Handle fzf selection if branch not provided
+  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
+    validate_name "$repo" "repository"
+    branch="$(select_branch_fzf "$repo" "Select worktree")" || die "No branch selected"
+  fi
+
+  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt log [<repo> [<branch>]]
+       Run from within a worktree to auto-detect, or specify repo/branch."
+
+  validate_name "$repo" "repository"
+  validate_name "$branch" "branch"
+
+  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
+  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Recent commits in ${C_MAGENTA}$branch${C_RESET} ${C_DIM}(vs $DEFAULT_BASE)${C_RESET}"
+  print -r -- ""
+
+  git -C "$wt_path" log --oneline --graph -n 20 "$DEFAULT_BASE"..HEAD 2>/dev/null || \
+    git -C "$wt_path" log --oneline --graph -n 20
+
+  print -r -- ""
+}
+
+cmd_diff() {
+  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-$DEFAULT_BASE}"
+
+  # Auto-detect from current directory if no args
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    branch="$DETECTED_BRANCH"
+  fi
+
+  # Handle fzf selection if branch not provided
+  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
+    validate_name "$repo" "repository"
+    branch="$(select_branch_fzf "$repo" "Select worktree to diff")" || die "No branch selected"
+  fi
+
+  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt diff [<repo> [<branch>]] [base]
+       Run from within a worktree to auto-detect, or specify repo/branch.
+       Default base: $DEFAULT_BASE"
+
+  validate_name "$repo" "repository"
+  validate_name "$branch" "branch"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
+
+  ensure_bare_repo "$git_dir"
+  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  # Fetch to ensure we have latest base
+  info "Fetching latest..."
+  git --git-dir="$git_dir" fetch --all --prune --quiet
+
+  # Check if base exists
+  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
+    die "Base branch '$base' not found. Try: origin/main, origin/staging, or origin/master"
+  fi
+
+  # Get stats
+  local commits; commits="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null)" || commits="?"
+  local files; files="$(git -C "$wt_path" diff --stat "$base"..HEAD 2>/dev/null | tail -1)" || files=""
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Diff: ${C_MAGENTA}$branch${C_RESET} ${C_DIM}vs${C_RESET} ${C_CYAN}$base${C_RESET}"
+  print -r -- ""
+  print -r -- "  ${C_DIM}Commits:${C_RESET} $commits"
+  [[ -n "$files" ]] && print -r -- "  ${C_DIM}Summary:${C_RESET} $files"
+  print -r -- ""
+
+  # Show the diff
+  git -C "$wt_path" diff "$base"..HEAD --stat
+
+  print -r -- ""
+  dim "  For full diff: git -C \"$wt_path\" diff $base..HEAD"
+  dim "  For patch:     git -C \"$wt_path\" diff $base..HEAD > changes.patch"
+  print -r -- ""
+}
+
+# navigation.sh - Navigation and editor commands
 
 cmd_code() {
   local repo="${1:-}"; local branch="${2:-}"
@@ -1912,64 +2382,6 @@ cmd_code() {
   "$editor" "$wt_path"
 }
 
-cmd_prune() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt prune <repo>"
-
-  validate_name "$repo" "repository"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  info "Pruning stale worktrees..."
-  git --git-dir="$git_dir" worktree prune -v
-
-  info "Looking for merged branches..."
-
-  # Get list of branches that have been merged to staging/main
-  local merged; merged="$(git --git-dir="$git_dir" branch --merged origin/staging 2>/dev/null | grep -v 'staging\|main\|master' | tr -d ' ')" || merged=""
-
-  if [[ -n "$merged" ]]; then
-    print -r -- ""
-    warn "The following branches appear to be merged:"
-    print -r -- "$merged" | while read -r b; do
-      [[ -n "$b" ]] && print -r -- "  ${C_DIM}$b${C_RESET}"
-    done
-    print -r -- ""
-
-    if [[ "$FORCE" == true ]]; then
-      print -r -- "$merged" | while read -r b; do
-        [[ -n "$b" ]] && git --git-dir="$git_dir" branch -D "$b" 2>/dev/null && ok "Deleted $b"
-      done
-    else
-      dim "Run with -f to delete merged branches"
-    fi
-  else
-    ok "No merged branches to clean up"
-  fi
-
-  ok "Prune complete"
-}
-
-cmd_exec() {
-  local repo="${1:-}"; local branch="${2:-}"
-  shift 2 2>/dev/null || die "Usage: wt exec <repo> <branch> <command...>"
-  local cmd=("$@")
-
-  [[ -n "$repo" && -n "$branch" && ${#cmd[@]} -gt 0 ]] || die "Usage: wt exec <repo> <branch> <command...>"
-
-  validate_name "$repo" "repository"
-  validate_name "$branch" "branch"
-
-  local wt_path
-  wt_path="$(resolve_wt_path "$repo" "$branch")"
-  [[ -d "$wt_path" ]] || die "Worktree not found at $wt_path"
-
-  pushd "$wt_path" >/dev/null || die "Failed to cd into $wt_path"
-  "${cmd[@]}"
-  popd >/dev/null
-}
-
 cmd_open() {
   local repo="${1:-}"; local branch="${2:-}"
 
@@ -1998,7 +2410,6 @@ cmd_open() {
   # Read APP_URL from .env file, fall back to folder-based URL
   local url=""
   if [[ -f "$wt_path/.env" ]]; then
-    # Extract APP_URL, strip quotes and trailing comments
     url="$(grep -E '^APP_URL=' "$wt_path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
   fi
 
@@ -2037,6 +2448,328 @@ cmd_cd() {
   resolve_wt_path "$repo" "$branch"
 }
 
+cmd_switch() {
+  local repo="${1:-}"; local branch="${2:-}"
+
+  # Note: No auto-detect for switch - it's meant to switch TO a different worktree
+
+  # Handle fzf selection if branch not provided
+  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
+    validate_name "$repo" "repository"
+    branch="$(select_branch_fzf "$repo" "Select worktree to switch to")" || die "No branch selected"
+  fi
+
+  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt switch <repo> [<branch>]"
+
+  validate_name "$repo" "repository"
+  validate_name "$branch" "branch"
+
+  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
+  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+
+  # Read APP_URL from .env file, fall back to folder-based URL
+  local url=""
+  if [[ -f "$wt_path/.env" ]]; then
+    url="$(grep -E '^APP_URL=' "$wt_path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
+  fi
+  if [[ -z "$url" ]]; then
+    local folder="${wt_path:t}"
+    url="https://${folder}.test"
+  fi
+
+  # Print path for cd (user can use: cd "$(wt switch ...)")
+  print -r -- "$wt_path"
+
+  # Open in editor
+  local editor="$DEFAULT_EDITOR"
+  if command -v "$editor" >/dev/null 2>&1; then
+    "$editor" "$wt_path" &
+  fi
+
+  # Open in browser
+  if command -v open >/dev/null 2>&1; then
+    open "$url" &
+  fi
+}
+
+cmd_exec() {
+  local repo="${1:-}"; local branch="${2:-}"
+  shift 2 2>/dev/null || die "Usage: wt exec <repo> <branch> <command...>"
+  local cmd=("$@")
+
+  [[ -n "$repo" && -n "$branch" && ${#cmd[@]} -gt 0 ]] || die "Usage: wt exec <repo> <branch> <command...>"
+
+  validate_name "$repo" "repository"
+  validate_name "$branch" "branch"
+
+  local wt_path
+  wt_path="$(resolve_wt_path "$repo" "$branch")"
+  [[ -d "$wt_path" ]] || die "Worktree not found at $wt_path"
+
+  pushd "$wt_path" >/dev/null || die "Failed to cd into $wt_path"
+  "${cmd[@]}"
+  popd >/dev/null
+}
+
+# info.sh - Information and status commands
+
+cmd_ls() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt ls [--json] <repo>"
+
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
+  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+
+  local json_items=()
+
+  display_worktree() {
+    local idx="$1" path="$2" branch="$3" head="$4"
+    local folder="${path:t}"
+    local url
+    if [[ -f "$path/.env" ]]; then
+      url="$(grep -E '^APP_URL=' "$path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
+    fi
+    [[ -z "$url" ]] && url="https://${folder}.test"
+    local sha; sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || true)"
+    local st; st="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+    local state_icon="●" state_color="$C_GREEN" state_text="clean"
+    local dirty=false
+    local mismatch=false
+
+    if [[ -n "$st" ]]; then
+      local changes; changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
+      state_icon="◐"
+      state_color="$C_YELLOW"
+      state_text="$changes uncommitted"
+      dirty=true
+    fi
+
+    # Check for branch/directory mismatch
+    local match_result="" expected_slug=""
+    if [[ -n "$branch" ]]; then
+      match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
+      if [[ "$match_result" == mismatch\|* ]]; then
+        mismatch=true
+        expected_slug="${match_result#mismatch|}"
+      fi
+    fi
+
+    # Get ahead/behind
+    local counts; counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
+    local ahead="${counts%% *}" behind="${counts##* }"
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      json_items+=("{\"path\": \"$(json_escape "$path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind, \"mismatch\": $mismatch}")
+    else
+      print -r -- "${C_BOLD}[$idx]${C_RESET} ${C_CYAN}$path${C_RESET}"
+      if [[ -n "$branch" ]]; then
+        print -r -- "    ${C_DIM}branch${C_RESET}  ${C_MAGENTA}$branch${C_RESET}"
+      else
+        [[ -n "$head" ]] && print -r -- "    ${C_DIM}head${C_RESET}    ${C_YELLOW}${head:0:12}${C_RESET} (detached)"
+      fi
+      [[ -n "$sha" ]] && print -r -- "    ${C_DIM}sha${C_RESET}     ${C_DIM}$sha${C_RESET}"
+      print -r -- "    ${C_DIM}state${C_RESET}   ${state_color}${state_icon} ${state_text}${C_RESET}"
+      if (( ahead > 0 || behind > 0 )); then
+        print -r -- "    ${C_DIM}sync${C_RESET}    ${C_GREEN}↑$ahead${C_RESET} ${C_RED}↓$behind${C_RESET}"
+      fi
+      print -r -- "    ${C_DIM}url${C_RESET}     ${C_BLUE}$url${C_RESET}"
+      print -r -- "    ${C_DIM}cd${C_RESET}      ${C_DIM}cd ${(q)path}${C_RESET}"
+      if [[ "$mismatch" == true ]]; then
+        print -r -- "    ${C_RED}MISMATCH${C_RESET} Directory name doesn't match branch!"
+        print -r -- "      ${C_DIM}Expected:${C_RESET} ${repo}--${expected_slug}"
+      fi
+      print -r -- ""
+    fi
+  }
+
+  local path="" branch="" head="" idx=0 line=""
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      if [[ -n "$path" ]]; then
+        idx=$((idx + 1))
+        display_worktree "$idx" "$path" "$branch" "$head"
+      fi
+      path=""; branch=""; head=""
+      continue
+    fi
+
+    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
+    [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
+  done <<< "$out"
+
+  # Handle last entry (no trailing blank line)
+  if [[ -n "$path" ]]; then
+    idx=$((idx + 1))
+    display_worktree "$idx" "$path" "$branch" "$head"
+  fi
+
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    format_json "[${(j:, :)json_items}]"
+  fi
+}
+
+cmd_status() {
+  local repo="${1:-}"
+  local stale_threshold=50
+  local inactive_days=30
+
+  [[ -n "$repo" ]] || die "Usage: wt status <repo>"
+
+  validate_name "$repo" "repository"
+
+  local git_dir
+  git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  info "Fetching latest..."
+  git --git-dir="$git_dir" fetch --all --prune --quiet
+
+  local out
+  out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
+  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+
+  # JSON output mode
+  local json_items=()
+
+  if [[ "$JSON_OUTPUT" != true ]]; then
+    print -r -- ""
+    print -r -- "${C_BOLD}Worktree Status: ${C_CYAN}$repo${C_RESET}"
+    print -r -- ""
+    printf "  ${C_DIM}%-28s %-10s %-14s %-6s %-7s %-10s${C_RESET}\n" "BRANCH" "STATE" "SYNC" "AGE" "MERGED" "SHA"
+    print -r -- "  ${C_DIM}$(printf '%.0s─' {1..83})${C_RESET}"
+  fi
+
+  local path="" branch="" head="" line=""
+  local sha st state_icon state_color changes counts ahead behind
+  local age age_days merged_icon sync_display is_stale is_inactive
+  local mismatches=()
+
+  # Helper to display a worktree row
+  display_status_row() {
+    local p="$1" b="$2"
+
+    sha="$(git -C "$p" rev-parse --short HEAD 2>/dev/null)" || sha="?"
+    st="$(git -C "$p" status --porcelain 2>/dev/null)" || st=""
+    state_icon="●"
+    state_color="$C_GREEN"
+    is_stale=false
+    is_inactive=false
+
+    if [[ -n "$st" ]]; then
+      changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
+      state_icon="◐ $changes"
+      state_color="$C_YELLOW"
+    fi
+
+    # Check for mismatch
+    local match_result="$(check_branch_directory_match "$p" "$b" "$repo")"
+    if [[ "$match_result" == mismatch\|* ]]; then
+      local expected_slug="${match_result#mismatch|}"
+      mismatches+=("${p:t}|$b|$expected_slug")
+    fi
+
+    # Get sync status
+    counts="$(get_ahead_behind "$p" "$DEFAULT_BASE")"
+    ahead="${counts%% *}"
+    behind="${counts##* }"
+
+    # Check if stale (>50 commits behind)
+    if (( behind > stale_threshold )); then
+      is_stale=true
+      sync_display="${C_RED}↑$ahead ↓$behind${C_RESET}"
+    else
+      sync_display="↑$ahead ↓$behind"
+    fi
+
+    # Get age
+    age="$(get_last_commit_age "$p")"
+    age_days="$(get_commit_age_days "$p")"
+    if (( age_days > inactive_days )); then
+      is_inactive=true
+    fi
+
+    # Check if merged
+    if is_branch_merged "$p" "$DEFAULT_BASE"; then
+      merged_icon="${C_DIM}✓${C_RESET}"
+    else
+      merged_icon="${C_DIM}-${C_RESET}"
+    fi
+
+    # Apply row colouring for stale/inactive
+    local branch_display="${b:0:26}"
+    local age_display="$age"
+    if [[ "$is_stale" == true ]]; then
+      branch_display="${C_RED}${b:0:26}${C_RESET}"
+      state_color="$C_RED"
+    elif [[ "$is_inactive" == true ]]; then
+      age_display="${C_YELLOW}$age${C_RESET}"
+    fi
+
+    if [[ "$JSON_OUTPUT" == true ]]; then
+      local dirty=false
+      [[ -n "$st" ]] && dirty=true
+      local merged=false
+      is_branch_merged "$p" "$DEFAULT_BASE" && merged=true
+      json_items+=("{\"branch\": \"$(json_escape "$b")\", \"path\": \"$(json_escape "$p")\", \"sha\": \"$(json_escape "$sha")\", \"dirty\": $dirty, \"changes\": ${changes:-0}, \"ahead\": $ahead, \"behind\": $behind, \"stale\": $is_stale, \"age\": \"$age\", \"age_days\": $age_days, \"merged\": $merged}")
+    else
+      printf "  %-28s ${state_color}%-10s${C_RESET} %-14s %-6s %-7s ${C_DIM}%-10s${C_RESET}\n" \
+        "$branch_display" "$state_icon" "$sync_display" "$age_display" "$merged_icon" "$sha"
+    fi
+  }
+
+  while IFS= read -r line; do
+    if [[ -z "$line" ]]; then
+      # Skip bare repo entry (no branch) and process worktrees
+      if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
+        display_status_row "$path" "$branch"
+      fi
+      path=""
+      branch=""
+      head=""
+      continue
+    fi
+
+    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
+    [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
+  done <<< "$out"
+
+  # Handle last entry
+  if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
+    display_status_row "$path" "$branch"
+  fi
+
+  # JSON output
+  if [[ "$JSON_OUTPUT" == true ]]; then
+    format_json "[${(j:, :)json_items}]"
+    return 0
+  fi
+
+  # Show mismatch warnings
+  if (( ${#mismatches[@]} > 0 )); then
+    print -r -- ""
+    print -r -- "${C_RED}${C_BOLD}Branch/Directory Mismatches Detected:${C_RESET}"
+    for m in "${mismatches[@]}"; do
+      local dir="${m%%|*}"
+      local rest="${m#*|}"
+      local actual_branch="${rest%%|*}"
+      local expected_slug="${rest#*|}"
+      print -r -- "  ${C_YELLOW}$dir${C_RESET}"
+      print -r -- "    ${C_DIM}Current branch:${C_RESET}  ${C_MAGENTA}$actual_branch${C_RESET}"
+      print -r -- "    ${C_DIM}Expected dir:${C_RESET}    ${repo}--${expected_slug}"
+      print -r -- "    ${C_DIM}Fix:${C_RESET} Checkout correct branch or recreate worktree"
+    done
+  fi
+
+  print -r -- ""
+}
+
 cmd_repos() {
   local repos; repos="$(list_repos)"
 
@@ -2056,7 +2789,7 @@ cmd_repos() {
     format_json "[${(j:, :)json_items}]"
   else
     print -r -- ""
-    print -r -- "${C_BOLD}📦 Repositories in ${C_CYAN}$HERD_ROOT${C_RESET}"
+    print -r -- "${C_BOLD}Repositories in ${C_CYAN}$HERD_ROOT${C_RESET}"
     print -r -- ""
     while IFS= read -r repo; do
       local git_dir; git_dir="$(git_dir_for "$repo")"
@@ -2068,13 +2801,246 @@ cmd_repos() {
   fi
 }
 
+cmd_report() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt report <repo> [--output <file>]"
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  local output_file=""
+  if [[ "${2:-}" == "--output" && -n "${3:-}" ]]; then
+    output_file="$3"
+  fi
+
+  # Generate markdown report
+  local report=""
+  report+="# Worktree Report: $repo\n\n"
+  report+="Generated: $(date '+%Y-%m-%d %H:%M:%S')\n\n"
+
+  # Get worktree list
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
+  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
+
+  report+="## Summary\n\n"
+
+  local total=0 clean=0 dirty=0
+  local path="" branch="" head=""
+
+  # First pass - count stats
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == worktree\ * ]]; then
+      path="${line#worktree }"
+    elif [[ "$line" == "branch refs/heads/"* ]]; then
+      branch="${line#branch refs/heads/}"
+    elif [[ "$line" == HEAD\ * ]]; then
+      head="${line#HEAD }"
+    elif [[ -z "$line" && -n "$path" ]]; then
+      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
+      total=$((total + 1))
+      local status; status="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+      if (( status > 0 )); then
+        dirty=$((dirty + 1))
+      else
+        clean=$((clean + 1))
+      fi
+      path=""; branch=""; head=""
+    fi
+  done <<< "$out"
+
+  report+="| Metric | Count |\n"
+  report+="|--------|-------|\n"
+  report+="| Total worktrees | $total |\n"
+  report+="| Clean | $clean |\n"
+  report+="| With changes | $dirty |\n\n"
+
+  report+="## Worktrees\n\n"
+  report+="| Branch | Status | Ahead | Behind | Last Commit |\n"
+  report+="|--------|--------|-------|--------|-------------|\n"
+
+  # Second pass - generate table
+  path=""; branch=""; head=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == worktree\ * ]]; then
+      path="${line#worktree }"
+    elif [[ "$line" == "branch refs/heads/"* ]]; then
+      branch="${line#branch refs/heads/}"
+    elif [[ "$line" == HEAD\ * ]]; then
+      head="${line#HEAD }"
+    elif [[ -z "$line" && -n "$path" ]]; then
+      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
+
+      local status_count; status_count="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+      local status_icon="clean"
+      (( status_count > 0 )) && status_icon="$status_count changes"
+
+      local ahead=0 behind=0
+      local upstream; upstream="$(git -C "$path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=""
+      if [[ -n "$upstream" ]]; then
+        ahead="$(git -C "$path" rev-list --count '@{upstream}'..HEAD 2>/dev/null)" || ahead=0
+        behind="$(git -C "$path" rev-list --count HEAD..'@{upstream}' 2>/dev/null)" || behind=0
+      fi
+
+      local last_commit; last_commit="$(git -C "$path" log -1 --format='%s' 2>/dev/null | cut -c1-40)" || last_commit=""
+      [[ ${#last_commit} -ge 40 ]] && last_commit="${last_commit}..."
+
+      report+="| \`$branch\` | $status_icon | $ahead | $behind | $last_commit |\n"
+
+      path=""; branch=""; head=""
+    fi
+  done <<< "$out"
+
+  report+="\n## Hooks Available\n\n"
+  if [[ -d "$WT_HOOKS_DIR" ]]; then
+    for hook_type in pre-add post-add pre-rm post-rm post-pull post-sync; do
+      if [[ -x "$WT_HOOKS_DIR/$hook_type" ]] || [[ -d "$WT_HOOKS_DIR/${hook_type}.d" ]]; then
+        report+="- \`$hook_type\` (enabled)\n"
+      else
+        report+="- \`$hook_type\` (not configured)\n"
+      fi
+    done
+  else
+    report+="No hooks directory found at \`$WT_HOOKS_DIR\`\n"
+  fi
+
+  # Output report
+  if [[ -n "$output_file" ]]; then
+    print -r -- "$report" > "$output_file"
+    ok "Report saved to: $output_file"
+  else
+    print -r -- "$report"
+  fi
+}
+
+cmd_health() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt health <repo>"
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Health Check: ${C_CYAN}$repo${C_RESET}"
+  print -r -- ""
+
+  local issues=0 warnings=0
+
+  # Check for stale worktrees
+  print -r -- "${C_BOLD}Stale Worktrees${C_RESET}"
+  local stale; stale="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null | grep -A1 '^worktree ' | grep -v '^worktree ' | grep -v '^--$' | while read -r path; do
+    [[ -n "$path" && ! -d "$path" ]] && echo "$path"
+  done)"
+  if [[ -n "$stale" ]]; then
+    warn "Found stale worktree references:"
+    print -r -- "$stale" | while read -r path; do
+      print -r -- "  ${C_RED}x${C_RESET} $path"
+    done
+    issues=$((issues + 1))
+    dim "  Fix: wt prune $repo"
+  else
+    ok "No stale worktrees"
+  fi
+  print -r -- ""
+
+  # Check for orphaned databases
+  print -r -- "${C_BOLD}Database Health${C_RESET}"
+  if command -v mysql >/dev/null 2>&1; then
+    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
+    [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
+
+    local dbs; dbs="$("${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
+
+    if [[ -n "$dbs" ]]; then
+      local orphaned=0
+      while read -r db; do
+        local found=false
+        local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || out=""
+        while IFS= read -r line; do
+          if [[ "$line" == worktree\ * ]]; then
+            local wt_path="${line#worktree }"
+            local wt_db; wt_db="$(db_name_for "$repo" "${wt_path##*--}")"
+            [[ "$wt_db" == "$db" ]] && found=true && break
+          fi
+        done <<< "$out"
+
+        if [[ "$found" == false ]]; then
+          [[ $orphaned -eq 0 ]] && warn "Potentially orphaned databases:"
+          print -r -- "  ${C_YELLOW}?${C_RESET} $db"
+          orphaned=$((orphaned + 1))
+        fi
+      done <<< "$dbs"
+
+      if [[ $orphaned -eq 0 ]]; then
+        ok "No orphaned databases found"
+      else
+        warnings=$((warnings + orphaned))
+        dim "  Verify and drop if not needed: mysql -e 'DROP DATABASE <name>'"
+      fi
+    else
+      dim "  No databases found matching pattern ${repo}__*"
+    fi
+  else
+    dim "  MySQL not available - skipping database checks"
+  fi
+  print -r -- ""
+
+  # Check for missing .env files
+  print -r -- "${C_BOLD}Environment Files${C_RESET}"
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || out=""
+  local missing_env=0
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      local path="${line#worktree }"
+      [[ "$path" == *.git ]] && continue
+      if [[ -f "$path/.env.example" && ! -f "$path/.env" ]]; then
+        [[ $missing_env -eq 0 ]] && warn "Worktrees missing .env file:"
+        print -r -- "  ${C_YELLOW}!${C_RESET} ${path##*/}"
+        missing_env=$((missing_env + 1))
+      fi
+    fi
+  done <<< "$out"
+  if [[ $missing_env -eq 0 ]]; then
+    ok "All worktrees have .env files"
+  else
+    warnings=$((warnings + missing_env))
+    dim "  Fix: cd <worktree> && cp .env.example .env"
+  fi
+  print -r -- ""
+
+  # Check for branch/directory mismatches
+  print -r -- "${C_BOLD}Branch Consistency${C_RESET}"
+  local mismatches=0
+  check_worktree_mismatches "$git_dir"
+  mismatches=$?
+  if [[ $mismatches -eq 0 ]]; then
+    ok "All worktrees match their expected branches"
+  else
+    issues=$((issues + mismatches))
+  fi
+  print -r -- ""
+
+  # Summary
+  print -r -- "${C_BOLD}Summary${C_RESET}"
+  if [[ $issues -eq 0 && $warnings -eq 0 ]]; then
+    ok "No issues found - repository is healthy!"
+  else
+    [[ $issues -gt 0 ]] && warn "$issues issue(s) need attention"
+    [[ $warnings -gt 0 ]] && dim "  $warnings warning(s) to review"
+  fi
+  print -r -- ""
+}
+
+# utility.sh - Utility and maintenance commands
+
 cmd_templates() {
   local template_name="${1:-}"
 
   if [[ -z "$template_name" ]]; then
     # List all templates
     print -r -- ""
-    print -r -- "${C_BOLD}📋 Available Templates${C_RESET}"
+    print -r -- "${C_BOLD}Available Templates${C_RESET}"
     print -r -- ""
     list_templates
     print -r -- ""
@@ -2093,7 +3059,7 @@ cmd_templates() {
   fi
 
   print -r -- ""
-  print -r -- "${C_BOLD}📋 Template: ${C_CYAN}$template_name${C_RESET}"
+  print -r -- "${C_BOLD}Template: ${C_CYAN}$template_name${C_RESET}"
   print -r -- ""
 
   # Extract description
@@ -2137,7 +3103,7 @@ cmd_templates() {
 
 cmd_doctor() {
   print -r -- ""
-  print -r -- "${C_BOLD}🩺 wt doctor${C_RESET}"
+  print -r -- "${C_BOLD}wt doctor${C_RESET}"
   print -r -- ""
 
   local issues=0
@@ -2278,7 +3244,7 @@ cmd_doctor() {
     fi
   else
     dim "  Hooks directory: $WT_HOOKS_DIR (not found)"
-    dim "  💡 Create hooks with: mkdir -p $WT_HOOKS_DIR"
+    dim "  Create hooks with: mkdir -p $WT_HOOKS_DIR"
   fi
 
   print -r -- ""
@@ -2290,11 +3256,9 @@ cmd_doctor() {
   print -r -- ""
 }
 
-# Clean up orphaned Herd nginx configs and certificates
-# Finds configs for sites that no longer have corresponding worktrees
 cmd_cleanup_herd() {
   print -r -- ""
-  print -r -- "${C_BOLD}🧹 Cleaning orphaned Herd configs${C_RESET}"
+  print -r -- "${C_BOLD}Cleaning orphaned Herd configs${C_RESET}"
   print -r -- ""
 
   if ! command -v herd >/dev/null 2>&1; then
@@ -2443,129 +3407,183 @@ cmd_unlock() {
   fi
 }
 
-cmd_fresh() {
-  local repo="${1:-}"; local branch="${2:-}"
+# New command: repair - Scan for and fix common issues
+cmd_repair() {
+  local repo="${1:-}"
 
-  # Auto-detect from current directory if no args
-  if [[ -z "$repo" ]] && detect_current_worktree; then
-    repo="$DETECTED_REPO"
-    branch="$DETECTED_BRANCH"
-    dim "  Detected: $repo / $branch"
-  fi
-
-  # Handle fzf selection if branch not provided
-  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
+  if [[ -z "$repo" ]]; then
+    # Repair all repos
+    info "Scanning all repositories for issues..."
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      _repair_repo "$repo_name" "$git_dir"
+    done
+  else
     validate_name "$repo" "repository"
-    branch="$(select_branch_fzf "$repo" "Select worktree to refresh")" || die "No branch selected"
+    local git_dir; git_dir="$(git_dir_for "$repo")"
+    ensure_bare_repo "$git_dir"
+    _repair_repo "$repo" "$git_dir"
+  fi
+}
+
+_repair_repo() {
+  local repo="$1"
+  local git_dir="$2"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Repairing: ${C_CYAN}$repo${C_RESET}"
+  print -r -- ""
+
+  local fixed=0
+
+  # 1. Prune orphaned worktrees
+  info "Checking for orphaned worktrees..."
+  local pruned; pruned="$(git --git-dir="$git_dir" worktree prune -v 2>&1)" || true
+  if [[ -n "$pruned" && "$pruned" != *"Nothing to prune"* ]]; then
+    print -r -- "$pruned" | while read -r line; do
+      ok "  Pruned: $line"
+    done
+    fixed=$((fixed + 1))
+  else
+    dim "  No orphaned worktrees"
   fi
 
-  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt fresh [<repo> [<branch>]]
-       Run from within a worktree to auto-detect, or specify repo/branch."
+  # 2. Clean stale index locks
+  info "Checking for stale index locks..."
+  local locks_cleaned=0
+  check_index_locks "$git_dir" "--auto-clean"
+  locks_cleaned=$?
+  if (( locks_cleaned > 0 )); then
+    fixed=$((fixed + 1))
+  else
+    dim "  No stale locks"
+  fi
 
-  validate_name "$repo" "repository"
-  validate_name "$branch" "branch"
-
-  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
-  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
-
-  pushd "$wt_path" >/dev/null || die "Failed to cd into $wt_path"
-
-  print -r -- ""
-  print -r -- "${C_BOLD}🔄 Refreshing ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
-  print -r -- ""
-
-  # Run migrate:fresh --seed (with confirmation unless forced)
-  if [[ -f "artisan" ]]; then
-    if [[ "$FORCE" == false ]]; then
-      warn "This will DROP ALL TABLES in the database!"
-      print -n "${C_YELLOW}Continue with migrate:fresh? [y/N]${C_RESET} "
-      local response
-      read -r response
-      if [[ ! "$response" =~ ^[Yy]$ ]]; then
-        warn "Skipping migrate:fresh"
-        popd >/dev/null
-        return 0
+  # 3. Check for missing .git files in worktrees
+  info "Checking worktree integrity..."
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
+  local path=""
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      path="${line#worktree }"
+    elif [[ -z "$line" && -n "$path" && "$path" != *.git ]]; then
+      if [[ -d "$path" && ! -f "$path/.git" ]]; then
+        warn "  Missing .git file: ${path##*/}"
+        dim "    May need to recreate worktree"
       fi
+      path=""
     fi
+  done <<< "$out"
 
-    info "Running migrate:fresh --seed..."
-    if php artisan migrate:fresh --seed; then
-      ok "Database refreshed"
-    else
-      warn "migrate:fresh --seed failed"
-    fi
-  fi
-
-  # Run npm ci
-  if [[ -f "package.json" ]]; then
-    info "Running npm ci..."
-    if npm ci; then
-      ok "npm dependencies installed"
-    else
-      warn "npm ci failed"
-    fi
-
-    # Run npm run build
-    info "Running npm run build..."
-    if npm run build; then
-      ok "Assets built"
-    else
-      warn "npm run build failed"
-    fi
-  fi
-
-  popd >/dev/null
-
-  notify "wt fresh" "Completed for $repo / $branch"
   print -r -- ""
-  ok "Fresh complete!"
-  print -r -- ""
+  if (( fixed > 0 )); then
+    ok "Fixed $fixed issue(s) in $repo"
+  else
+    ok "No issues found in $repo"
+  fi
 }
 
-cmd_switch() {
-  local repo="${1:-}"; local branch="${2:-}"
+# New parallel commands
 
-  # Note: No auto-detect for switch - it's meant to switch TO a different worktree
-
-  # Handle fzf selection if branch not provided
-  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
-    validate_name "$repo" "repository"
-    branch="$(select_branch_fzf "$repo" "Select worktree to switch to")" || die "No branch selected"
-  fi
-
-  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt switch <repo> [<branch>]"
+cmd_fresh_all() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt fresh-all <repo>"
 
   validate_name "$repo" "repository"
-  validate_name "$branch" "branch"
 
-  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
-  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
 
-  # Read APP_URL from .env file, fall back to folder-based URL
-  local url=""
-  if [[ -f "$wt_path/.env" ]]; then
-    # Extract APP_URL, strip quotes and trailing comments
-    url="$(grep -E '^APP_URL=' "$wt_path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
-  fi
-  if [[ -z "$url" ]]; then
-    local folder="${wt_path:t}"
-    url="https://${folder}.test"
-  fi
+  # Collect worktrees
+  local worktrees=()
+  collect_worktrees "$git_dir" worktrees
 
-  # Print path for cd (user can use: cd "$(wt switch ...)")
-  print -r -- "$wt_path"
+  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
 
-  # Open in editor
-  local editor="$DEFAULT_EDITOR"
-  if command -v "$editor" >/dev/null 2>&1; then
-    "$editor" "$wt_path" &
+  # Confirm destructive operation
+  if [[ "$FORCE" == false ]]; then
+    warn "This will run migrate:fresh on ${#worktrees[@]} worktree(s)!"
+    warn "All databases will be DROPPED and recreated."
+    print -n "${C_YELLOW}Continue? [y/N]${C_RESET} "
+    local response; read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || die "Aborted"
   fi
 
-  # Open in browser
-  if command -v open >/dev/null 2>&1; then
-    open "$url" &
-  fi
+  # Build operations list
+  local operations=()
+  for wt_entry in "${worktrees[@]}"; do
+    local wt_path="${wt_entry%%|*}"
+    local wt_branch="${wt_entry##*|}"
+    if [[ -f "$wt_path/artisan" ]]; then
+      operations+=("$wt_branch|cd '$wt_path' && php artisan migrate:fresh --seed && npm ci && npm run build")
+    fi
+  done
+
+  parallel_run report_results "${operations[@]}"
+  notify "wt fresh-all" "Completed for $repo"
 }
+
+cmd_build_all() {
+  local repo="${1:-}"
+  [[ -n "$repo" ]] || die "Usage: wt build-all <repo>"
+
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # Collect worktrees
+  local worktrees=()
+  collect_worktrees "$git_dir" worktrees
+
+  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+
+  # Build operations list
+  local operations=()
+  for wt_entry in "${worktrees[@]}"; do
+    local wt_path="${wt_entry%%|*}"
+    local wt_branch="${wt_entry##*|}"
+    if [[ -f "$wt_path/package.json" ]]; then
+      operations+=("$wt_branch|cd '$wt_path' && npm run build")
+    fi
+  done
+
+  parallel_run report_results "${operations[@]}"
+  notify "wt build-all" "Completed for $repo"
+}
+
+cmd_exec_all() {
+  local repo="${1:-}"
+  shift || true
+  local cmd=("$@")
+
+  [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || die "Usage: wt exec-all <repo> <command...>"
+
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # Collect worktrees
+  local worktrees=()
+  collect_worktrees "$git_dir" worktrees
+
+  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+
+  # Build operations list
+  local operations=()
+  local cmd_str="${cmd[*]}"
+  for wt_entry in "${worktrees[@]}"; do
+    local wt_path="${wt_entry%%|*}"
+    local wt_branch="${wt_entry##*|}"
+    operations+=("$wt_branch|cd '$wt_path' && $cmd_str")
+  done
+
+  parallel_run report_results "${operations[@]}"
+}
+
+# laravel.sh - Laravel-specific commands
 
 cmd_migrate() {
   local repo="${1:-}"; local branch="${2:-}"
@@ -2627,333 +3645,11 @@ cmd_tinker() {
   popd >/dev/null
 }
 
-cmd_log() {
-  local repo="${1:-}"; local branch="${2:-}"
-
-  # Auto-detect from current directory if no args
-  if [[ -z "$repo" ]] && detect_current_worktree; then
-    repo="$DETECTED_REPO"
-    branch="$DETECTED_BRANCH"
-  fi
-
-  # Handle fzf selection if branch not provided
-  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
-    validate_name "$repo" "repository"
-    branch="$(select_branch_fzf "$repo" "Select worktree")" || die "No branch selected"
-  fi
-
-  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt log [<repo> [<branch>]]
-       Run from within a worktree to auto-detect, or specify repo/branch."
-
-  validate_name "$repo" "repository"
-  validate_name "$branch" "branch"
-
-  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
-  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
-
-  print -r -- ""
-  print -r -- "${C_BOLD}📜 Recent commits in ${C_MAGENTA}$branch${C_RESET} ${C_DIM}(vs $DEFAULT_BASE)${C_RESET}"
-  print -r -- ""
-
-  git -C "$wt_path" log --oneline --graph -n 20 "$DEFAULT_BASE"..HEAD 2>/dev/null || \
-    git -C "$wt_path" log --oneline --graph -n 20
-
-  print -r -- ""
-}
-
-cmd_diff() {
-  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-$DEFAULT_BASE}"
-
-  # Auto-detect from current directory if no args
-  if [[ -z "$repo" ]] && detect_current_worktree; then
-    repo="$DETECTED_REPO"
-    branch="$DETECTED_BRANCH"
-  fi
-
-  # Handle fzf selection if branch not provided
-  if [[ -n "$repo" && -z "$branch" ]] && command -v fzf >/dev/null 2>&1; then
-    validate_name "$repo" "repository"
-    branch="$(select_branch_fzf "$repo" "Select worktree to diff")" || die "No branch selected"
-  fi
-
-  [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt diff [<repo> [<branch>]] [base]
-       Run from within a worktree to auto-detect, or specify repo/branch.
-       Default base: $DEFAULT_BASE"
-
-  validate_name "$repo" "repository"
-  validate_name "$branch" "branch"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
-
-  ensure_bare_repo "$git_dir"
-  [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
-
-  # Fetch to ensure we have latest base
-  info "Fetching latest..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet
-
-  # Check if base exists
-  if ! git -C "$wt_path" rev-parse --verify "$base" >/dev/null 2>&1; then
-    die "Base branch '$base' not found. Try: origin/main, origin/staging, or origin/master"
-  fi
-
-  # Get stats
-  local commits; commits="$(git -C "$wt_path" rev-list --count "$base"..HEAD 2>/dev/null)" || commits="?"
-  local files; files="$(git -C "$wt_path" diff --stat "$base"..HEAD 2>/dev/null | tail -1)" || files=""
-
-  print -r -- ""
-  print -r -- "${C_BOLD}📊 Diff: ${C_MAGENTA}$branch${C_RESET} ${C_DIM}vs${C_RESET} ${C_CYAN}$base${C_RESET}"
-  print -r -- ""
-  print -r -- "  ${C_DIM}Commits:${C_RESET} $commits"
-  [[ -n "$files" ]] && print -r -- "  ${C_DIM}Summary:${C_RESET} $files"
-  print -r -- ""
-
-  # Show the diff
-  git -C "$wt_path" diff "$base"..HEAD --stat
-
-  print -r -- ""
-  dim "  💡 For full diff: git -C \"$wt_path\" diff $base..HEAD"
-  dim "  💡 For patch:     git -C \"$wt_path\" diff $base..HEAD > changes.patch"
-  print -r -- ""
-}
-
-cmd_report() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt report <repo> [--output <file>]"
-  validate_name "$repo" "repository"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  local output_file=""
-  if [[ "${2:-}" == "--output" && -n "${3:-}" ]]; then
-    output_file="$3"
-  fi
-
-  # Generate markdown report
-  local report=""
-  report+="# Worktree Report: $repo\n\n"
-  report+="Generated: $(date '+%Y-%m-%d %H:%M:%S')\n\n"
-
-  # Get worktree list
-  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  [[ -n "$out" ]] || { dim "No worktrees found."; return 0; }
-
-  report+="## Summary\n\n"
-
-  local total=0 clean=0 dirty=0
-  local path="" branch="" head=""
-
-  # First pass - count stats
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == worktree\ * ]]; then
-      path="${line#worktree }"
-    elif [[ "$line" == "branch refs/heads/"* ]]; then
-      branch="${line#branch refs/heads/}"
-    elif [[ "$line" == HEAD\ * ]]; then
-      head="${line#HEAD }"
-    elif [[ -z "$line" && -n "$path" ]]; then
-      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
-      total=$((total + 1))
-      local status; status="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-      if (( status > 0 )); then
-        dirty=$((dirty + 1))
-      else
-        clean=$((clean + 1))
-      fi
-      path=""; branch=""; head=""
-    fi
-  done <<< "$out"
-
-  report+="| Metric | Count |\n"
-  report+="|--------|-------|\n"
-  report+="| Total worktrees | $total |\n"
-  report+="| Clean | $clean |\n"
-  report+="| With changes | $dirty |\n\n"
-
-  report+="## Worktrees\n\n"
-  report+="| Branch | Status | Ahead | Behind | Last Commit |\n"
-  report+="|--------|--------|-------|--------|-------------|\n"
-
-  # Second pass - generate table
-  path=""; branch=""; head=""
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    if [[ "$line" == worktree\ * ]]; then
-      path="${line#worktree }"
-    elif [[ "$line" == "branch refs/heads/"* ]]; then
-      branch="${line#branch refs/heads/}"
-    elif [[ "$line" == HEAD\ * ]]; then
-      head="${line#HEAD }"
-    elif [[ -z "$line" && -n "$path" ]]; then
-      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
-
-      local status_count; status_count="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
-      local status_icon="✅"
-      (( status_count > 0 )) && status_icon="⚠️ $status_count changes"
-
-      local ahead=0 behind=0
-      local upstream; upstream="$(git -C "$path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=""
-      if [[ -n "$upstream" ]]; then
-        ahead="$(git -C "$path" rev-list --count '@{upstream}'..HEAD 2>/dev/null)" || ahead=0
-        behind="$(git -C "$path" rev-list --count HEAD..'@{upstream}' 2>/dev/null)" || behind=0
-      fi
-
-      local last_commit; last_commit="$(git -C "$path" log -1 --format='%s' 2>/dev/null | cut -c1-40)" || last_commit=""
-      [[ ${#last_commit} -ge 40 ]] && last_commit="${last_commit}..."
-
-      report+="| \`$branch\` | $status_icon | $ahead | $behind | $last_commit |\n"
-
-      path=""; branch=""; head=""
-    fi
-  done <<< "$out"
-
-  report+="\n## Hooks Available\n\n"
-  if [[ -d "$WT_HOOKS_DIR" ]]; then
-    for hook_type in pre-add post-add pre-rm post-rm post-pull post-sync; do
-      if [[ -x "$WT_HOOKS_DIR/$hook_type" ]] || [[ -d "$WT_HOOKS_DIR/${hook_type}.d" ]]; then
-        report+="- ✅ \`$hook_type\`\n"
-      else
-        report+="- ⬜ \`$hook_type\`\n"
-      fi
-    done
-  else
-    report+="No hooks directory found at \`$WT_HOOKS_DIR\`\n"
-  fi
-
-  # Output report
-  if [[ -n "$output_file" ]]; then
-    print -r -- "$report" > "$output_file"
-    ok "Report saved to: $output_file"
-  else
-    print -r -- "$report"
-  fi
-}
-
-cmd_health() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt health <repo>"
-  validate_name "$repo" "repository"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  print -r -- ""
-  print -r -- "${C_BOLD}🏥 Health Check: ${C_CYAN}$repo${C_RESET}"
-  print -r -- ""
-
-  local issues=0 warnings=0
-
-  # Check for stale worktrees (directories that no longer exist)
-  print -r -- "${C_BOLD}Stale Worktrees${C_RESET}"
-  local stale; stale="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null | grep -A1 '^worktree ' | grep -v '^worktree ' | grep -v '^--$' | while read -r path; do
-    [[ -n "$path" && ! -d "$path" ]] && echo "$path"
-  done)"
-  if [[ -n "$stale" ]]; then
-    warn "Found stale worktree references:"
-    print -r -- "$stale" | while read -r path; do
-      print -r -- "  ${C_RED}✖${C_RESET} $path"
-    done
-    issues=$((issues + 1))
-    dim "  💡 Fix: wt prune $repo"
-  else
-    ok "No stale worktrees"
-  fi
-  print -r -- ""
-
-  # Check for orphaned databases
-  print -r -- "${C_BOLD}Database Health${C_RESET}"
-  if command -v mysql >/dev/null 2>&1; then
-    local mysql_cmd=(mysql -h "$DB_HOST" -u "$DB_USER" -N -B)
-    [[ -n "$DB_PASSWORD" ]] && mysql_cmd+=(-p"$DB_PASSWORD")
-
-    # Get all databases matching repo pattern
-    local dbs; dbs="$("${mysql_cmd[@]}" -e "SHOW DATABASES LIKE '${repo}__%'" 2>/dev/null)" || dbs=""
-
-    if [[ -n "$dbs" ]]; then
-      local orphaned=0
-      while read -r db; do
-        # Check if corresponding worktree exists
-        local found=false
-        local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || out=""
-        while IFS= read -r line; do
-          if [[ "$line" == worktree\ * ]]; then
-            local wt_path="${line#worktree }"
-            local wt_db; wt_db="$(db_name_for "$repo" "${wt_path##*--}")"
-            [[ "$wt_db" == "$db" ]] && found=true && break
-          fi
-        done <<< "$out"
-
-        if [[ "$found" == false ]]; then
-          [[ $orphaned -eq 0 ]] && warn "Potentially orphaned databases:"
-          print -r -- "  ${C_YELLOW}?${C_RESET} $db"
-          orphaned=$((orphaned + 1))
-        fi
-      done <<< "$dbs"
-
-      if [[ $orphaned -eq 0 ]]; then
-        ok "No orphaned databases found"
-      else
-        warnings=$((warnings + orphaned))
-        dim "  💡 Verify and drop if not needed: mysql -e 'DROP DATABASE <name>'"
-      fi
-    else
-      dim "  No databases found matching pattern ${repo}__*"
-    fi
-  else
-    dim "  MySQL not available - skipping database checks"
-  fi
-  print -r -- ""
-
-  # Check for missing .env files
-  print -r -- "${C_BOLD}Environment Files${C_RESET}"
-  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || out=""
-  local missing_env=0
-  while IFS= read -r line; do
-    if [[ "$line" == worktree\ * ]]; then
-      local path="${line#worktree }"
-      [[ "$path" == *.git ]] && continue
-      if [[ -f "$path/.env.example" && ! -f "$path/.env" ]]; then
-        [[ $missing_env -eq 0 ]] && warn "Worktrees missing .env file:"
-        print -r -- "  ${C_YELLOW}!${C_RESET} ${path##*/}"
-        missing_env=$((missing_env + 1))
-      fi
-    fi
-  done <<< "$out"
-  if [[ $missing_env -eq 0 ]]; then
-    ok "All worktrees have .env files"
-  else
-    warnings=$((warnings + missing_env))
-    dim "  💡 Fix: cd <worktree> && cp .env.example .env"
-  fi
-  print -r -- ""
-
-  # Check for branch/directory mismatches
-  print -r -- "${C_BOLD}Branch Consistency${C_RESET}"
-  local mismatches=0
-  check_worktree_mismatches "$git_dir"
-  mismatches=$?
-  if [[ $mismatches -eq 0 ]]; then
-    ok "All worktrees match their expected branches"
-  else
-    issues=$((issues + mismatches))
-  fi
-  print -r -- ""
-
-  # Summary
-  print -r -- "${C_BOLD}Summary${C_RESET}"
-  if [[ $issues -eq 0 && $warnings -eq 0 ]]; then
-    ok "No issues found - repository is healthy! 🎉"
-  else
-    [[ $issues -gt 0 ]] && warn "$issues issue(s) need attention"
-    [[ $warnings -gt 0 ]] && dim "  $warnings warning(s) to review"
-  fi
-  print -r -- ""
-}
+# 99-main.sh - Main entry point, usage, and flag parsing
 
 usage() {
   print -r -- ""
-  print -r -- "${C_BOLD}🌳 wt${C_RESET} v$VERSION - Git worktree manager for Laravel Herd"
+  print -r -- "${C_BOLD}wt${C_RESET} v$VERSION - Git worktree manager for Laravel Herd"
   print -r -- ""
   print -r -- "${C_BOLD}USAGE${C_RESET}"
   print -r -- "  wt [flags] <command> [args]"
@@ -2962,6 +3658,7 @@ usage() {
   print -r -- "  ${C_GREEN}add${C_RESET}      ${C_DIM}<repo> <branch> [base]${C_RESET}     Create worktree"
   print -r -- "           ${C_DIM}--template=<name>, -t <name>${C_RESET}  Use template"
   print -r -- "           ${C_DIM}--dry-run${C_RESET}                     Preview without creating"
+  print -r -- "           ${C_DIM}--interactive, -i${C_RESET}             Guided creation wizard"
   print -r -- "  ${C_GREEN}rm${C_RESET}       ${C_DIM}<repo> [branch]${C_RESET}            Remove worktree"
   print -r -- "  ${C_GREEN}ls${C_RESET}       ${C_DIM}<repo>${C_RESET}                     List worktrees"
   print -r -- "  ${C_GREEN}repos${C_RESET}                               List all repositories"
@@ -2975,6 +3672,11 @@ usage() {
   print -r -- "  ${C_GREEN}diff${C_RESET}     ${C_DIM}[repo] [branch] [base]${C_RESET}     Show diff against base branch"
   print -r -- "  ${C_GREEN}log${C_RESET}      ${C_DIM}[repo] [branch]${C_RESET}            Show recent commits"
   print -r -- "  ${C_GREEN}prune${C_RESET}    ${C_DIM}<repo>${C_RESET}                     Clean up stale worktrees"
+  print -r -- ""
+  print -r -- "${C_BOLD}PARALLEL COMMANDS${C_RESET}"
+  print -r -- "  ${C_GREEN}fresh-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    migrate:fresh + build on all"
+  print -r -- "  ${C_GREEN}build-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    npm run build on all"
+  print -r -- "  ${C_GREEN}exec-all${C_RESET}  ${C_DIM}<repo> <cmd>${C_RESET}              Run command on all"
   print -r -- ""
   print -r -- "${C_BOLD}LARAVEL COMMANDS${C_RESET} ${C_DIM}(auto-detect when run from worktree)${C_RESET}"
   print -r -- "  ${C_GREEN}fresh${C_RESET}    ${C_DIM}[repo] [branch]${C_RESET}            migrate:fresh + npm ci + build"
@@ -2991,6 +3693,7 @@ usage() {
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
+  print -r -- "  ${C_GREEN}repair${C_RESET}   ${C_DIM}[repo]${C_RESET}                     Fix common issues"
   print -r -- "  ${C_GREEN}report${C_RESET}   ${C_DIM}<repo> [--output <file>]${C_RESET}  Generate markdown status report"
   print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
   print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
@@ -2998,6 +3701,7 @@ usage() {
   print -r -- "${C_BOLD}FLAGS${C_RESET}"
   print -r -- "  ${C_YELLOW}-q, --quiet${C_RESET}          Suppress informational output"
   print -r -- "  ${C_YELLOW}-f, --force${C_RESET}          Skip confirmations / force protected branch removal"
+  print -r -- "  ${C_YELLOW}-i, --interactive${C_RESET}    Launch interactive worktree creation wizard"
   print -r -- "  ${C_YELLOW}--json${C_RESET}               Output in JSON format"
   print -r -- "  ${C_YELLOW}--pretty${C_RESET}             Pretty-print JSON output with colours"
   print -r -- "  ${C_YELLOW}--dry-run${C_RESET}            Preview actions without executing (wt add)"
@@ -3012,6 +3716,9 @@ usage() {
   print -r -- "  wt clone git@github.com:org/myapp.git"
   print -r -- "  wt add myapp feature/login"
   print -r -- ""
+  print -r -- "  ${C_DIM}# Interactive worktree creation${C_RESET}"
+  print -r -- "  wt add --interactive"
+  print -r -- ""
   print -r -- "  ${C_DIM}# Navigate to worktree${C_RESET}"
   print -r -- "  cd \"\$(wt cd myapp feature/login)\""
   print -r -- ""
@@ -3020,6 +3727,10 @@ usage() {
   print -r -- ""
   print -r -- "  ${C_DIM}# Run command in worktree${C_RESET}"
   print -r -- "  wt exec myapp feature/login php artisan migrate"
+  print -r -- ""
+  print -r -- "  ${C_DIM}# Parallel operations${C_RESET}"
+  print -r -- "  wt pull-all myapp          ${C_DIM}# pull all worktrees${C_RESET}"
+  print -r -- "  wt build-all myapp         ${C_DIM}# build all worktrees${C_RESET}"
   print -r -- ""
   print -r -- "  ${C_DIM}# Use template with dry-run preview${C_RESET}"
   print -r -- "  wt add myapp feature/api --template=backend --dry-run"
@@ -3036,6 +3747,7 @@ usage() {
   print -r -- "  ${C_YELLOW}WT_CONFIG${C_RESET}         Config file path ${C_DIM}(default: ~/.wtrc)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_URL_SUBDOMAIN${C_RESET}  Optional URL subdomain ${C_DIM}(e.g., api -> api.feature.test)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_HOOKS_DIR${C_RESET}      Hooks directory ${C_DIM}(default: ~/.wt/hooks)${C_RESET}"
+  print -r -- "  ${C_YELLOW}WT_MAX_PARALLEL${C_RESET}   Max parallel operations ${C_DIM}(default: 4)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_HOST${C_RESET}        MySQL host ${C_DIM}(default: 127.0.0.1)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_USER${C_RESET}        MySQL user ${C_DIM}(default: root)${C_RESET}"
   print -r -- "  ${C_YELLOW}WT_DB_PASSWORD${C_RESET}    MySQL password ${C_DIM}(default: empty)${C_RESET}"
@@ -3087,6 +3799,7 @@ parse_flags() {
     case "$1" in
       -q|--quiet) QUIET=true ;;
       -f|--force) FORCE=true ;;
+      -i|--interactive) INTERACTIVE=true ;;
       --json) JSON_OUTPUT=true ;;
       --delete-branch) DELETE_BRANCH=true ;;
       --drop-db) DROP_DB=true ;;
@@ -3127,35 +3840,47 @@ main() {
   local cmd="${1:-}"
   shift || true
 
+  # Handle interactive mode for add command
+  if [[ "$INTERACTIVE" == true ]]; then
+    if [[ -z "$cmd" || "$cmd" == "add" ]]; then
+      interactive_add "$@"
+      return $?
+    fi
+  fi
+
   case "$cmd" in
-    add)      cmd_add "$@" ;;
-    rm)       cmd_rm "$@" ;;
-    ls)       cmd_ls "$@" ;;
-    status)   cmd_status "$@" ;;
-    pull)     cmd_pull "$@" ;;
-    pull-all) cmd_pull_all "$@" ;;
-    sync)     cmd_sync "$@" ;;
-    clone)    cmd_clone "$@" ;;
-    code)     cmd_code "$@" ;;
-    open)     cmd_open "$@" ;;
-    cd)       cmd_cd "$@" ;;
-    exec)     cmd_exec "$@" ;;
-    prune)    cmd_prune "$@" ;;
-    repos)    cmd_repos "$@" ;;
-    templates) cmd_templates "$@" ;;
-    doctor)   cmd_doctor "$@" ;;
+    add)          cmd_add "$@" ;;
+    rm)           cmd_rm "$@" ;;
+    ls)           cmd_ls "$@" ;;
+    status)       cmd_status "$@" ;;
+    pull)         cmd_pull "$@" ;;
+    pull-all)     cmd_pull_all "$@" ;;
+    sync)         cmd_sync "$@" ;;
+    clone)        cmd_clone "$@" ;;
+    code)         cmd_code "$@" ;;
+    open)         cmd_open "$@" ;;
+    cd)           cmd_cd "$@" ;;
+    exec)         cmd_exec "$@" ;;
+    prune)        cmd_prune "$@" ;;
+    repos)        cmd_repos "$@" ;;
+    templates)    cmd_templates "$@" ;;
+    doctor)       cmd_doctor "$@" ;;
     cleanup-herd) cmd_cleanup_herd "$@" ;;
-    unlock)   cmd_unlock "$@" ;;
-    fresh)    cmd_fresh "$@" ;;
-    switch)   cmd_switch "$@" ;;
-    migrate)  cmd_migrate "$@" ;;
-    tinker)   cmd_tinker "$@" ;;
-    log)      cmd_log "$@" ;;
-    diff)     cmd_diff "$@" ;;
-    report)   cmd_report "$@" ;;
-    health)   cmd_health "$@" ;;
-    "")       usage ;;
-    *)        die "Unknown command: $cmd (try: wt --help)" ;;
+    unlock)       cmd_unlock "$@" ;;
+    fresh)        cmd_fresh "$@" ;;
+    fresh-all)    cmd_fresh_all "$@" ;;
+    build-all)    cmd_build_all "$@" ;;
+    exec-all)     cmd_exec_all "$@" ;;
+    repair)       cmd_repair "$@" ;;
+    switch)       cmd_switch "$@" ;;
+    migrate)      cmd_migrate "$@" ;;
+    tinker)       cmd_tinker "$@" ;;
+    log)          cmd_log "$@" ;;
+    diff)         cmd_diff "$@" ;;
+    report)       cmd_report "$@" ;;
+    health)       cmd_health "$@" ;;
+    "")           usage ;;
+    *)            die "Unknown command: $cmd (try: wt --help)" ;;
   esac
 }
 
