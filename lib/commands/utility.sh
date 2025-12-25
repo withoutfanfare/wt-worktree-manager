@@ -451,45 +451,7 @@ _repair_repo() {
   fi
 }
 
-# New parallel commands
-
-cmd_fresh_all() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt fresh-all <repo>"
-
-  validate_name "$repo" "repository"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  # Collect worktrees
-  local worktrees=()
-  collect_worktrees "$git_dir" worktrees
-
-  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
-
-  # Confirm destructive operation
-  if [[ "$FORCE" == false ]]; then
-    warn "This will run migrate:fresh on ${#worktrees[@]} worktree(s)!"
-    warn "All databases will be DROPPED and recreated."
-    print -n "${C_YELLOW}Continue? [y/N]${C_RESET} "
-    local response; read -r response
-    [[ "$response" =~ ^[Yy]$ ]] || die "Aborted"
-  fi
-
-  # Build operations list
-  local operations=()
-  for wt_entry in "${worktrees[@]}"; do
-    local wt_path="${wt_entry%%|*}"
-    local wt_branch="${wt_entry##*|}"
-    if [[ -f "$wt_path/artisan" ]]; then
-      operations+=("$wt_branch|cd '$wt_path' && php artisan migrate:fresh --seed && npm ci && npm run build")
-    fi
-  done
-
-  parallel_run report_results "${operations[@]}"
-  notify "wt fresh-all" "Completed for $repo"
-}
+# Parallel commands
 
 cmd_build_all() {
   local repo="${1:-}"

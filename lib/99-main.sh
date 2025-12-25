@@ -28,7 +28,6 @@ usage() {
   print -r -- "  ${C_GREEN}prune${C_RESET}    ${C_DIM}<repo>${C_RESET}                     Clean up stale worktrees"
   print -r -- ""
   print -r -- "${C_BOLD}PARALLEL COMMANDS${C_RESET}"
-  print -r -- "  ${C_GREEN}fresh-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    migrate:fresh + build on all"
   print -r -- "  ${C_GREEN}build-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    npm run build on all"
   print -r -- "  ${C_GREEN}exec-all${C_RESET}  ${C_DIM}<repo> <cmd>${C_RESET}              Run command on all"
   print -r -- ""
@@ -222,7 +221,6 @@ main() {
     cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)       cmd_unlock "$@" ;;
     fresh)        cmd_fresh "$@" ;;
-    fresh-all)    cmd_fresh_all "$@" ;;
     build-all)    cmd_build_all "$@" ;;
     exec-all)     cmd_exec_all "$@" ;;
     repair)       cmd_repair "$@" ;;

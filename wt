@@ -3484,45 +3484,7 @@ _repair_repo() {
   fi
 }
 
-# New parallel commands
-
-cmd_fresh_all() {
-  local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt fresh-all <repo>"
-
-  validate_name "$repo" "repository"
-
-  local git_dir; git_dir="$(git_dir_for "$repo")"
-  ensure_bare_repo "$git_dir"
-
-  # Collect worktrees
-  local worktrees=()
-  collect_worktrees "$git_dir" worktrees
-
-  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
-
-  # Confirm destructive operation
-  if [[ "$FORCE" == false ]]; then
-    warn "This will run migrate:fresh on ${#worktrees[@]} worktree(s)!"
-    warn "All databases will be DROPPED and recreated."
-    print -n "${C_YELLOW}Continue? [y/N]${C_RESET} "
-    local response; read -r response
-    [[ "$response" =~ ^[Yy]$ ]] || die "Aborted"
-  fi
-
-  # Build operations list
-  local operations=()
-  for wt_entry in "${worktrees[@]}"; do
-    local wt_path="${wt_entry%%|*}"
-    local wt_branch="${wt_entry##*|}"
-    if [[ -f "$wt_path/artisan" ]]; then
-      operations+=("$wt_branch|cd '$wt_path' && php artisan migrate:fresh --seed && npm ci && npm run build")
-    fi
-  done
-
-  parallel_run report_results "${operations[@]}"
-  notify "wt fresh-all" "Completed for $repo"
-}
+# Parallel commands
 
 cmd_build_all() {
   local repo="${1:-}"
@@ -3674,7 +3636,6 @@ usage() {
   print -r -- "  ${C_GREEN}prune${C_RESET}    ${C_DIM}<repo>${C_RESET}                     Clean up stale worktrees"
   print -r -- ""
   print -r -- "${C_BOLD}PARALLEL COMMANDS${C_RESET}"
-  print -r -- "  ${C_GREEN}fresh-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    migrate:fresh + build on all"
   print -r -- "  ${C_GREEN}build-all${C_RESET} ${C_DIM}<repo>${C_RESET}                    npm run build on all"
   print -r -- "  ${C_GREEN}exec-all${C_RESET}  ${C_DIM}<repo> <cmd>${C_RESET}              Run command on all"
   print -r -- ""
@@ -3868,7 +3829,6 @@ main() {
     cleanup-herd) cmd_cleanup_herd "$@" ;;
     unlock)       cmd_unlock "$@" ;;
     fresh)        cmd_fresh "$@" ;;
-    fresh-all)    cmd_fresh_all "$@" ;;
     build-all)    cmd_build_all "$@" ;;
     exec-all)     cmd_exec_all "$@" ;;
     repair)       cmd_repair "$@" ;;

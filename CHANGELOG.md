@@ -45,7 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Step progress indicator for multi-step operations
 
 #### Parallel Operations
-- **`wt fresh-all <repo>`** - Run `migrate:fresh --seed` + npm build on all worktrees
 - **`wt build-all <repo>`** - Run `npm run build` on all worktrees
 - **`wt exec-all <repo> <command>`** - Execute any command across all worktrees
 - Configurable concurrency via `WT_MAX_PARALLEL` environment variable (default: 4)
@@ -64,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Version 4.0.0** - Major version bump for architectural changes
 - **Help text** - Updated to show new commands and flags
 - **Default parallel limit** - 4 concurrent operations (configurable via `WT_MAX_PARALLEL`)
+
+### Removed
+- **`wt fresh-all`** - Removed due to destructive nature (runs `migrate:fresh` on all worktrees). Use `wt exec-all <repo> "php artisan migrate:fresh --seed"` if needed.
 
 ### Developer Notes
 - Modules are sourced in dependency order (00 through 99)

@@ -489,7 +489,6 @@ wt migrate <repo> <branch>      # Run migrations
 wt tinker <repo> <branch>       # Open tinker
 
 # Parallel operations (v4.0.0)
-wt fresh-all <repo>             # migrate:fresh + build on all worktrees
 wt build-all <repo>             # npm run build on all worktrees
 wt exec-all <repo> <cmd>        # Run command on all worktrees
 
@@ -945,7 +944,6 @@ Displays the last 15 commits in a compact one-line format with relative dates.
 
 | Command | Description |
 |---------|-------------|
-| `wt fresh-all <repo>` | Run `migrate:fresh --seed` + npm build on all worktrees |
 | `wt build-all <repo>` | Run `npm run build` on all worktrees |
 | `wt exec-all <repo> <cmd>` | Execute command across all worktrees |
 | `wt pull-all <repo>` | Pull all worktrees (parallel) |
@@ -1909,7 +1907,6 @@ Check with: `wt --version`
 - Spinners available for hooks to use in `composer install`, `npm ci`, etc.
 
 **Parallel operations:**
-- **`wt fresh-all <repo>`** - Run `migrate:fresh --seed` + npm build on all worktrees
 - **`wt build-all <repo>`** - Run `npm run build` on all worktrees
 - **`wt exec-all <repo> <cmd>`** - Execute any command across all worktrees
 - Configurable concurrency via `WT_MAX_PARALLEL` (default: 4)

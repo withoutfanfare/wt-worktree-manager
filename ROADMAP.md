@@ -18,7 +18,7 @@ A prioritised roadmap for future development of the wt worktree manager.
 - **Modular architecture** with 18 focused modules in `lib/`
 - **Interactive mode** for guided worktree creation
 - **Progress indicators** (spinners) for long operations
-- **Parallel operations** (fresh-all, build-all, exec-all)
+- **Parallel operations** (build-all, exec-all)
 - **Resilience improvements** (repair, lock cleanup, retry logic)
 
 **Key Gaps Identified:**
@@ -282,7 +282,6 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 **Why:** Faster multi-worktree operations
 
 - [x] Parallel execution for:
-  - `wt fresh-all <repo>` - migrate:fresh + npm build on all worktrees
   - `wt build-all <repo>` - npm run build on all worktrees
   - `wt exec-all <repo> <cmd>` - Execute any command on all worktrees
   - `wt pull-all <repo>` - Already parallel (enhanced)
