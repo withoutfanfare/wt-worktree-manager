@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 set -euo pipefail
 
-readonly VERSION="3.6.0"
+readonly VERSION="3.7.0"
 
 # Defaults (can be overridden by config file or env vars)
 HERD_ROOT="${HERD_ROOT:-$HOME/Herd}"
@@ -84,6 +84,36 @@ load_config() {
   parse_config_file "$config_file"
   # Also check HERD_ROOT/.wtconfig
   parse_config_file "$HERD_ROOT/.wtconfig"
+}
+
+# Load repo-specific config from bare repo directory
+# Called by commands that need repo-specific settings (add, sync, clone)
+load_repo_config() {
+  local git_dir="$1"
+  local repo_config="$git_dir/.wtconfig"
+
+  [[ -f "$repo_config" ]] || return 0
+
+  # Re-use the parse_config_file function from load_config
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "$key" || "$key" =~ ^[[:space:]]*$ ]] && continue
+
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    value="${value%%#*}"
+    value="${value%"${value##*[![:space:]]}"}"
+
+    case "$key" in
+      DEFAULT_BASE) DEFAULT_BASE="$value" ;;
+      WT_URL_SUBDOMAIN) WT_URL_SUBDOMAIN="$value" ;;
+      PROTECTED_BRANCHES) PROTECTED_BRANCHES="$value" ;;
+    esac
+  done < "$repo_config"
 }
 
 # Colours (disabled if not a tty or JSON output)
@@ -393,13 +423,15 @@ wt_path_for() {
 url_for() {
   local repo="$1"
   local branch="$2"
-  local feature; feature="$(extract_feature_name "$branch")"
+  local slug; slug="$(slugify_branch "$branch")"
+  local site_name="${repo}--${slug}"
 
-  # Build URL: [subdomain.]feature-name.test
+  # Build URL: [subdomain.]site-name.test
+  # Site name matches the directory name used by Herd
   if [[ -n "$WT_URL_SUBDOMAIN" ]]; then
-    print -r -- "https://${WT_URL_SUBDOMAIN}.${feature}.test"
+    print -r -- "https://${WT_URL_SUBDOMAIN}.${site_name}.test"
   else
-    print -r -- "https://${feature}.test"
+    print -r -- "https://${site_name}.test"
   fi
 }
 
@@ -711,6 +743,9 @@ run_hooks() {
       export WT_URL="$app_url"
       export WT_DB_NAME="$db_name"
       export WT_HOOK_NAME="$hook_name"
+      # Control flags for hooks
+      [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+      [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
 
       # Run hook from the worktree directory
       cd "$wt_path" 2>/dev/null || cd "$HOME"
@@ -728,9 +763,8 @@ run_hooks() {
   # Also check for numbered hooks (post-add.d/*.sh pattern for multiple hooks)
   local hooks_d="$WT_HOOKS_DIR/${hook_name}.d"
   if [[ -d "$hooks_d" ]]; then
-    for hook_script in "$hooks_d"/*(*)(N); do
-      [[ -x "$hook_script" ]] || continue
-
+    # Run global hooks (files only, not directories)
+    for hook_script in "$hooks_d"/*(N.x); do
       # Security check before executing
       if ! verify_hook_security "$hook_script"; then
         continue
@@ -746,6 +780,8 @@ run_hooks() {
         export WT_URL="$app_url"
         export WT_DB_NAME="$db_name"
         export WT_HOOK_NAME="$hook_name"
+        [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+        [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
 
         cd "$wt_path" 2>/dev/null || cd "$HOME"
 
@@ -756,6 +792,39 @@ run_hooks() {
         fi
       )
     done
+
+    # Run repo-specific hooks (from subdirectory matching repo name)
+    local repo_hooks_d="$hooks_d/$repo"
+    if [[ -d "$repo_hooks_d" ]]; then
+      for hook_script in "$repo_hooks_d"/*(N.x); do
+        # Security check before executing
+        if ! verify_hook_security "$hook_script"; then
+          continue
+        fi
+
+        local script_name="${hook_script:t}"
+        info "Running ${C_CYAN}$hook_name.d/$repo/$script_name${C_RESET}..."
+
+        (
+          export WT_REPO="$repo"
+          export WT_BRANCH="$branch"
+          export WT_PATH="$wt_path"
+          export WT_URL="$app_url"
+          export WT_DB_NAME="$db_name"
+          export WT_HOOK_NAME="$hook_name"
+          [[ "$NO_BACKUP" == true ]] && export WT_NO_BACKUP="true"
+          [[ "$DROP_DB" == true ]] && export WT_DROP_DB="true"
+
+          cd "$wt_path" 2>/dev/null || cd "$HOME"
+
+          if "$hook_script"; then
+            ok "  $repo/$script_name completed"
+          else
+            warn "  $repo/$script_name exited with non-zero status"
+          fi
+        )
+      done
+    fi
   fi
 
   return 0
@@ -766,18 +835,24 @@ run_hooks() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_add() {
-  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-$DEFAULT_BASE}"
+  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-}"
   [[ -n "$repo" && -n "$branch" ]] || die "Usage: wt add <repo> <branch> [base]"
 
   validate_name "$repo" "repository"
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # Load repo-specific config (may override DEFAULT_BASE)
+  load_repo_config "$git_dir"
+
+  # Use provided base or default
+  [[ -z "$base" ]] && base="$DEFAULT_BASE"
+
   local wt_path; wt_path="$(wt_path_for "$repo" "$branch")"
   local app_url; app_url="$(url_for "$repo" "$branch")"
   local db_name; db_name="$(db_name_for "$repo" "$branch")"
-
-  ensure_bare_repo "$git_dir"
 
   info "Fetching latest branches..."
   git --git-dir="$git_dir" fetch --all --prune --quiet
@@ -826,61 +901,12 @@ cmd_add() {
     dim "  💡 Push failed (may need to push manually later): git push -u origin $branch"
   fi
 
-  # Setup worktree
-  pushd "$wt_path" >/dev/null || die "Failed to cd into $wt_path"
-
-  if [[ -f ".env.example" && ! -f ".env" ]]; then
-    info "Creating .env"
-    cp .env.example .env
-  fi
-
-  if [[ -f ".env" ]]; then
-    info "Setting APP_URL=$app_url"
-    sed_inplace "s|^APP_URL=.*|APP_URL=$app_url|" .env
-
-    info "Setting DB_DATABASE=$db_name"
-    sed_inplace "s|^DB_DATABASE=.*|DB_DATABASE=$db_name|" .env
-  fi
-
-  # Create database
-  create_database "$db_name"
-
-  # Secure site with HTTPS via Herd
-  local site_name="${wt_path:t}"
-  if command -v herd >/dev/null 2>&1; then
-    info "Securing site with HTTPS..."
-    if herd secure "$site_name" >/dev/null 2>&1; then
-      ok "Site secured: ${C_CYAN}$site_name${C_RESET}"
-    else
-      warn "Could not secure site - run: ${C_DIM}herd secure $site_name${C_RESET}"
-    fi
-  else
-    dim "  💡 Install Herd and run: herd secure $site_name"
-  fi
-
-  if command -v composer >/dev/null && [[ -f "composer.json" ]]; then
-    info "composer install"
-    composer install --ignore-platform-req=ext-imagick
-    if ! php artisan key:generate --force >/dev/null 2>&1; then
-      warn "Failed to generate app key - run: ${C_DIM}php artisan key:generate${C_RESET}"
-    fi
-  fi
-
-  if [[ -f "package.json" ]]; then
-    dim "  💡 Run: npm ci && npm run dev"
-  fi
-
-  if [[ -f "artisan" ]]; then
-    dim "  💡 Run: php artisan migrate"
-  fi
-
-  popd >/dev/null
-
   # Success - disable cleanup trap
   cleanup_needed=false
   trap - EXIT
 
-  # Run post-add hooks
+  # Run post-add hooks (handles .env, database, composer, npm, etc.)
+  # See ~/.wt/hooks/post-add.d/ for customisation
   run_hooks "post-add" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -938,19 +964,10 @@ cmd_rm() {
   fi
 
   # Run pre-rm hooks (can abort by returning non-zero)
+  # Database backup is handled by pre-rm hooks - see ~/.wt/hooks/pre-rm.d/
   if ! run_hooks "pre-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"; then
     die "Pre-rm hook failed - aborting"
   fi
-
-  # Backup database before removal (unless --no-backup)
-  if [[ "$NO_BACKUP" == false ]]; then
-    backup_database "$db_name" "$repo"
-  else
-    dim "  💡 Skipping database backup (--no-backup)"
-  fi
-
-  # Unsecure site in Herd
-  unsecure_site "$site_name"
 
   info "Removing worktree ${C_CYAN}$wt_path${C_RESET}"
   if [[ "$FORCE" == true ]]; then
@@ -965,15 +982,11 @@ cmd_rm() {
     git --git-dir="$git_dir" branch -D "$branch" 2>/dev/null || warn "Could not delete branch (may not exist locally)"
   fi
 
-  # Drop database if requested
-  if [[ "$DROP_DB" == true ]]; then
-    drop_database "$db_name"
-  fi
-
   info "Pruning stale worktrees..."
   git --git-dir="$git_dir" worktree prune
 
-  # Run post-rm hooks
+  # Run post-rm hooks (handles Herd unsecure, database drop, etc.)
+  # See ~/.wt/hooks/post-rm.d/ for customisation
   run_hooks "post-rm" "$repo" "$branch" "$wt_path" "$app_url" "$db_name"
 
   ok "Worktree removed"
@@ -1337,7 +1350,7 @@ cmd_pull_all() {
 }
 
 cmd_sync() {
-  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-$DEFAULT_BASE}"
+  local repo="${1:-}"; local branch="${2:-}"; local base="${3:-}"
 
   # Auto-detect from current directory if no args
   if [[ -z "$repo" ]] && detect_current_worktree; then
@@ -1359,9 +1372,15 @@ cmd_sync() {
   validate_name "$branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
-  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
-
   ensure_bare_repo "$git_dir"
+
+  # Load repo-specific config (may override DEFAULT_BASE)
+  load_repo_config "$git_dir"
+
+  # Use provided base or default
+  [[ -z "$base" ]] && base="$DEFAULT_BASE"
+
+  local wt_path; wt_path="$(resolve_wt_path "$repo" "$branch")"
   [[ -d "$wt_path" ]] || die_wt_not_found "$repo" "$wt_path"
 
   info "Fetching latest..."
@@ -1383,8 +1402,8 @@ cmd_sync() {
 }
 
 cmd_clone() {
-  local url="${1:-}"; local repo="${2:-}"
-  [[ -n "$url" ]] || die "Usage: wt clone <url> [repo-name]"
+  local url="${1:-}"; local repo="${2:-}"; local initial_branch="${3:-}"
+  [[ -n "$url" ]] || die "Usage: wt clone <url> [repo-name] [branch]"
 
   # Extract repo name from URL if not provided
   if [[ -z "$repo" ]]; then
@@ -1393,6 +1412,7 @@ cmd_clone() {
   fi
 
   validate_name "$repo" "repository"
+  [[ -z "$initial_branch" ]] || validate_name "$initial_branch" "branch"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
 
@@ -1410,8 +1430,30 @@ cmd_clone() {
   print -r -- ""
   ok "Bare repo created at ${C_CYAN}$git_dir${C_RESET}"
 
+  # If specific branch requested, create worktree for it
+  if [[ -n "$initial_branch" ]]; then
+    print -r -- ""
+    # Check if it's a remote branch
+    if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/$initial_branch"; then
+      info "Creating worktree for ${C_GREEN}$initial_branch${C_RESET}..."
+      cmd_add "$repo" "$initial_branch" "origin/$initial_branch"
+    else
+      # Branch doesn't exist on remote - create as new branch from default base
+      local base_branch=""
+      if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
+        base_branch="origin/staging"
+      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/main"; then
+        base_branch="origin/main"
+      elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/master"; then
+        base_branch="origin/master"
+      else
+        die "Branch '$initial_branch' not found on remote and no default base branch available"
+      fi
+      info "Creating new branch ${C_GREEN}$initial_branch${C_RESET} from $base_branch..."
+      cmd_add "$repo" "$initial_branch" "$base_branch"
+    fi
   # Auto-create staging worktree if staging branch exists
-  if /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
+  elif /usr/bin/git --git-dir="$git_dir" show-ref --quiet "refs/remotes/origin/staging"; then
     print -r -- ""
     info "Found staging branch - creating worktree..."
     cmd_add "$repo" "staging" "origin/staging"
@@ -2456,7 +2498,7 @@ usage() {
   print -r -- "  ${C_GREEN}rm${C_RESET}       ${C_DIM}<repo> [branch]${C_RESET}            Remove worktree"
   print -r -- "  ${C_GREEN}ls${C_RESET}       ${C_DIM}<repo>${C_RESET}                     List worktrees"
   print -r -- "  ${C_GREEN}repos${C_RESET}                               List all repositories"
-  print -r -- "  ${C_GREEN}clone${C_RESET}    ${C_DIM}<url> [name]${C_RESET}               Clone as bare repo"
+  print -r -- "  ${C_GREEN}clone${C_RESET}    ${C_DIM}<url> [name] [branch]${C_RESET}      Clone as bare repo"
   print -r -- ""
   print -r -- "${C_BOLD}GIT COMMANDS${C_RESET} ${C_DIM}(auto-detect repo/branch when run from worktree)${C_RESET}"
   print -r -- "  ${C_GREEN}status${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Dashboard view of all worktrees"
@@ -2556,6 +2598,7 @@ usage() {
   print -r -- "    php artisan migrate"
   print -r -- ""
   print -r -- "  ${C_DIM}Multiple hooks: Create ~/.wt/hooks/post-add.d/ with numbered scripts${C_RESET}"
+  print -r -- "  ${C_DIM}Repo-specific: Create ~/.wt/hooks/post-add.d/<repo>/ for repo-only hooks${C_RESET}"
   print -r -- ""
 }
 

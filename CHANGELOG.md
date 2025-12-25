@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.0] - 2025-12-25
+
+### Changed
+- **Generic worktree manager** - Refactored `wt` to be a framework-agnostic git worktree manager. All Laravel-specific functionality (database creation, composer install, npm, Herd securing, migrations) has been moved into optional hooks
+- **Hook-based architecture** - Worktree setup is now fully customisable via lifecycle hooks in `~/.wt/hooks/`. Install the example hooks for Laravel projects, or create your own for any framework
+
+### Added
+- **Comprehensive example hooks** for Laravel projects:
+  - `00-register-project.sh` - Register worktree in `~/.projects` for quick navigation
+  - `01-copy-env.sh` - Copy `.env.example` to `.env`
+  - `02-configure-env.sh` - Set `APP_URL` and `DB_DATABASE` in `.env`
+  - `03-create-database.sh` - Create MySQL database
+  - `04-herd-secure.sh` - Secure site with Herd HTTPS
+  - `05-composer-install.sh` - Run `composer install` + generate app key
+  - `06-npm-install.sh` - Run `npm install`
+  - `07-build-assets.sh` - Run `npm run build`
+  - `08-run-migrations.sh` - Run Laravel migrations
+  - `pre-rm.d/01-backup-database.sh` - Backup database before removal
+  - `post-rm.d/01-herd-unsecure.sh` - Remove Herd SSL config
+  - `post-rm.d/02-drop-database.sh` - Drop database (opt-in via `--drop-db`)
+- **Repo-specific hooks** - Create subdirectories matching repo names (e.g., `post-add.d/myapp/`) for hooks that only run for specific repositories
+- **Per-repository config** - Load `.wtconfig` from bare repo directory (e.g., `~/Herd/myapp.git/.wtconfig`) for repo-specific settings like `DEFAULT_BASE`
+- **Hook control flags** - Skip specific hooks via environment variables: `WT_SKIP_DB`, `WT_SKIP_COMPOSER`, `WT_SKIP_NPM`, `WT_SKIP_BUILD`, `WT_SKIP_MIGRATE`, `WT_SKIP_HERD`
+- **Installer merge/overwrite modes** - Run `./install.sh --merge` to add new example hooks without overwriting existing ones, or `--overwrite` to replace all hooks (backs up first)
+
+### Fixed
+- **Hooks not running** - Fixed zsh glob qualifier order bug where `*(.x)(N)` didn't match executable files. Corrected to `*(N.x)` (null glob must come first)
+- **URL generation** - Fixed `url_for()` to include repository name, generating correct URLs like `https://myapp--feature-login.test` instead of just `https://feature-login.test`
+- **Repo-specific config loading** - Fixed `DEFAULT_BASE` not being loaded from per-repo `.wtconfig` files
+
 ## [3.6.0] - 2025-12-24
 
 ### Security
@@ -17,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **`wt health <repo>`** - New command to check repository health (stale worktrees, orphaned databases, missing .env files, branch mismatches)
 - **`wt report <repo>`** - New command to generate markdown status report with worktree summary, status, and hook availability
+- **`wt clone` branch argument** - Clone and create worktree for a specific branch in one command: `wt clone <url> [name] [branch]`
+  - If branch exists on remote, creates worktree for it
+  - If branch doesn't exist, creates new branch from staging/main/master
 - **Additional lifecycle hooks** - Added `pre-add`, `pre-rm`, `post-pull`, and `post-sync` hooks alongside existing `post-add` and `post-rm`
   - Pre-hooks can abort operations by returning non-zero exit code
 - Database names are now automatically truncated with a hash suffix if they exceed MySQL's 64-character limit

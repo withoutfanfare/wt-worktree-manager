@@ -6,18 +6,84 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Colour
+DIM='\033[2m'
+NC='\033[0m'
 
-# Defaults
+# Get the directory where this script lives (the repo)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Defaults - can be overridden with environment variables
 INSTALL_DIR="${WT_INSTALL_DIR:-/usr/local/bin}"
-COMPLETIONS_DIR="${WT_COMPLETIONS_DIR:-$HOME/.zsh/completions}"
+
+# Command-line options
+HOOKS_MODE=""  # merge, overwrite, skip, or empty for interactive
+QUIET=false
+
+usage() {
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "Options:"
+  echo "  --merge       Install new example hooks, keep existing (default when interactive)"
+  echo "  --overwrite   Replace all hooks with examples"
+  echo "  --skip-hooks  Don't install or modify hooks"
+  echo "  --quiet       Minimal output"
+  echo "  -h, --help    Show this help"
+  echo ""
+  echo "Environment variables:"
+  echo "  WT_INSTALL_DIR      Installation directory (default: /usr/local/bin)"
+  echo "  WT_COMPLETIONS_DIR  Completions directory (auto-detected)"
+  exit 0
+}
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --merge)
+      HOOKS_MODE="merge"
+      shift
+      ;;
+    --overwrite)
+      HOOKS_MODE="overwrite"
+      shift
+      ;;
+    --skip-hooks)
+      HOOKS_MODE="skip"
+      shift
+      ;;
+    --quiet)
+      QUIET=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo -e "${RED}Unknown option: $1${NC}"
+      usage
+      ;;
+  esac
+done
+
+# Auto-detect best completions directory
+detect_completions_dir() {
+  # Prefer Homebrew's site-functions (most Mac devs have this)
+  if [[ -d "/opt/homebrew/share/zsh/site-functions" ]]; then
+    echo "/opt/homebrew/share/zsh/site-functions"  # Apple Silicon
+  elif [[ -d "/usr/local/share/zsh/site-functions" ]]; then
+    echo "/usr/local/share/zsh/site-functions"  # Intel Mac
+  else
+    echo "$HOME/.zsh/completions"  # Fallback
+  fi
+}
+
+COMPLETIONS_DIR="${WT_COMPLETIONS_DIR:-$(detect_completions_dir)}"
 
 print_header() {
   echo ""
-  echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-  echo -e "${BLUE}║${NC}    ${GREEN}wt${NC} - Git Worktree Manager          ${BLUE}║${NC}"
-  echo -e "${BLUE}║${NC}    for Laravel Herd                    ${BLUE}║${NC}"
-  echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+  echo -e "${BLUE}=======================================${NC}"
+  echo -e "${BLUE}  ${GREEN}wt${NC} - Git Worktree Manager"
+  echo -e "${BLUE}  for Laravel Herd${NC}"
+  echo -e "${BLUE}=======================================${NC}"
   echo ""
 }
 
@@ -42,28 +108,28 @@ check_requirements() {
 
   # Check for Laravel Herd
   if ! command -v herd &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} herd (Laravel Herd not found - some features will be limited)"
+    echo -e "  ${YELLOW}!${NC} herd ${DIM}(optional - some features will be limited)${NC}"
   else
     echo -e "  ${GREEN}✓${NC} herd"
   fi
 
   # Check for composer
   if ! command -v composer &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} composer (optional, needed for Laravel projects)"
+    echo -e "  ${YELLOW}!${NC} composer ${DIM}(optional - needed for Laravel projects)${NC}"
   else
     echo -e "  ${GREEN}✓${NC} composer"
   fi
 
   # Check for fzf
   if ! command -v fzf &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} fzf (optional, enables interactive selection)"
+    echo -e "  ${YELLOW}!${NC} fzf ${DIM}(optional - enables interactive selection)${NC}"
   else
     echo -e "  ${GREEN}✓${NC} fzf"
   fi
 
   # Check for mysql
   if ! command -v mysql &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} mysql (optional, enables database management)"
+    echo -e "  ${YELLOW}!${NC} mysql ${DIM}(optional - enables database management)${NC}"
   else
     echo -e "  ${GREEN}✓${NC} mysql"
   fi
@@ -86,38 +152,63 @@ install_script() {
     sudo mkdir -p "$INSTALL_DIR"
   fi
 
-  # Copy the main script
-  if [[ -w "$INSTALL_DIR" ]]; then
-    cp wt "$INSTALL_DIR/wt"
-    chmod +x "$INSTALL_DIR/wt"
-  else
-    sudo cp wt "$INSTALL_DIR/wt"
-    sudo chmod +x "$INSTALL_DIR/wt"
+  # Remove existing file/symlink
+  if [[ -e "$INSTALL_DIR/wt" || -L "$INSTALL_DIR/wt" ]]; then
+    if [[ -w "$INSTALL_DIR" ]]; then
+      rm -f "$INSTALL_DIR/wt"
+    else
+      sudo rm -f "$INSTALL_DIR/wt"
+    fi
   fi
-  echo -e "  ${GREEN}✓${NC} Installed wt to $INSTALL_DIR/wt"
+
+  # Create symlink to the repository version
+  if [[ -w "$INSTALL_DIR" ]]; then
+    ln -sf "$SCRIPT_DIR/wt" "$INSTALL_DIR/wt"
+  else
+    sudo ln -sf "$SCRIPT_DIR/wt" "$INSTALL_DIR/wt"
+  fi
+  echo -e "  ${GREEN}✓${NC} Linked wt to $INSTALL_DIR/wt"
+  echo -e "    ${DIM}→ $SCRIPT_DIR/wt${NC}"
 }
 
 install_completions() {
   echo -e "${BLUE}Installing zsh completions...${NC}"
 
-  # Create completions directory
-  mkdir -p "$COMPLETIONS_DIR"
+  # Create completions directory if needed
+  if [[ ! -d "$COMPLETIONS_DIR" ]]; then
+    if [[ -w "$(dirname "$COMPLETIONS_DIR")" ]]; then
+      mkdir -p "$COMPLETIONS_DIR"
+    else
+      sudo mkdir -p "$COMPLETIONS_DIR"
+    fi
+  fi
 
-  # Copy completion script
-  cp _wt "$COMPLETIONS_DIR/_wt"
-  echo -e "  ${GREEN}✓${NC} Installed completions to $COMPLETIONS_DIR/_wt"
+  # Remove existing file/symlink
+  if [[ -e "$COMPLETIONS_DIR/_wt" || -L "$COMPLETIONS_DIR/_wt" ]]; then
+    if [[ -w "$COMPLETIONS_DIR" ]]; then
+      rm -f "$COMPLETIONS_DIR/_wt"
+    else
+      sudo rm -f "$COMPLETIONS_DIR/_wt"
+    fi
+  fi
+
+  # Create symlink
+  if [[ -w "$COMPLETIONS_DIR" ]]; then
+    ln -sf "$SCRIPT_DIR/_wt" "$COMPLETIONS_DIR/_wt"
+  else
+    sudo ln -sf "$SCRIPT_DIR/_wt" "$COMPLETIONS_DIR/_wt"
+  fi
+  echo -e "  ${GREEN}✓${NC} Linked completions to $COMPLETIONS_DIR/_wt"
+  echo -e "    ${DIM}→ $SCRIPT_DIR/_wt${NC}"
 }
 
 create_config() {
   local config_file="$HOME/.wtrc"
 
   if [[ -f "$config_file" ]]; then
-    echo -e "${YELLOW}Config file already exists at $config_file${NC}"
-    read -p "Overwrite? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-      return
-    fi
+    echo -e "${BLUE}Config file...${NC}"
+    echo -e "  ${GREEN}✓${NC} Already exists at $config_file"
+    return
   fi
 
   echo -e "${BLUE}Creating config file...${NC}"
@@ -132,7 +223,7 @@ create_config() {
 
   cat > "$config_file" << EOF
 # wt configuration file
-# See: https://github.com/YOUR_USERNAME/wt-worktree-manager
+# See: https://github.com/dannyharding10/wt-worktree-manager
 
 # Where your Herd/Valet sites live
 HERD_ROOT=$herd_root
@@ -140,7 +231,7 @@ HERD_ROOT=$herd_root
 # Default base branch for new worktrees
 DEFAULT_BASE=origin/staging
 
-# Editor to open with 'wt code'
+# Editor to open with 'wt code' (cursor, code, zed, etc.)
 DEFAULT_EDITOR=cursor
 
 # Database connection
@@ -160,35 +251,219 @@ EOF
   echo -e "  ${GREEN}✓${NC} Created config at $config_file"
 }
 
-print_next_steps() {
+create_hooks_dir() {
+  local hooks_dir="$HOME/.wt/hooks"
+  local hook_dirs=("pre-add.d" "post-add.d" "pre-rm.d" "post-rm.d" "post-pull.d" "post-sync.d")
+
+  echo -e "${BLUE}Setting up hooks directory...${NC}"
+
+  # Create main hooks directory
+  if [[ ! -d "$hooks_dir" ]]; then
+    mkdir -p "$hooks_dir"
+    echo -e "  ${GREEN}✓${NC} Created $hooks_dir"
+  else
+    echo -e "  ${GREEN}✓${NC} Already exists at $hooks_dir"
+  fi
+
+  # Create all hook subdirectories
+  for hook_subdir in "${hook_dirs[@]}"; do
+    if [[ ! -d "$hooks_dir/$hook_subdir" ]]; then
+      mkdir -p "$hooks_dir/$hook_subdir"
+      echo -e "  ${GREEN}✓${NC} Created $hooks_dir/$hook_subdir"
+    fi
+  done
+}
+
+install_example_hooks() {
+  local hooks_dir="$HOME/.wt/hooks"
+  local examples_dir="$SCRIPT_DIR/examples/hooks"
+
+  # Skip if no examples directory
+  if [[ ! -d "$examples_dir" ]]; then
+    return
+  fi
+
+  echo -e "${BLUE}Example hooks...${NC}"
+
+  # Count existing hook files (excluding directories and README)
+  local existing_count
+  existing_count=$(find "$hooks_dir" -type f ! -name "README*" 2>/dev/null | wc -l | tr -d ' ')
+
+  # If HOOKS_MODE not set, determine interactively or use defaults
+  if [[ -z "$HOOKS_MODE" ]]; then
+    if [[ "$existing_count" -eq 0 ]]; then
+      # Fresh install - default to merge (install all examples)
+      HOOKS_MODE="merge"
+      echo -e "  ${DIM}Installing example hooks...${NC}"
+    else
+      # Existing hooks - ask user
+      echo ""
+      echo -e "  Found ${YELLOW}$existing_count${NC} existing hook file(s)."
+      echo ""
+      echo -e "  How would you like to handle example hooks?"
+      echo -e "    ${GREEN}[M]${NC}erge  - Add new examples, keep your existing hooks (default)"
+      echo -e "    ${YELLOW}[O]${NC}verwrite - Replace all with examples (backs up existing)"
+      echo -e "    ${DIM}[S]${NC}kip  - Don't modify hooks"
+      echo ""
+      read -r -p "  Choice [M/o/s]: " choice
+      case "${choice:-m}" in
+        [Oo]*)
+          HOOKS_MODE="overwrite"
+          ;;
+        [Ss]*)
+          HOOKS_MODE="skip"
+          ;;
+        *)
+          HOOKS_MODE="merge"
+          ;;
+      esac
+    fi
+  fi
+
+  case "$HOOKS_MODE" in
+    skip)
+      echo -e "  ${DIM}Skipped (use --merge or --overwrite to install examples)${NC}"
+      return
+      ;;
+    overwrite)
+      install_hooks_overwrite "$hooks_dir" "$examples_dir"
+      ;;
+    merge|*)
+      install_hooks_merge "$hooks_dir" "$examples_dir"
+      ;;
+  esac
+}
+
+install_hooks_merge() {
+  local hooks_dir="$1"
+  local examples_dir="$2"
+  local installed=0
+  local skipped=0
+
+  # Find all example files (excluding README and directories)
+  while IFS= read -r -d '' src_file; do
+    # Get relative path from examples_dir
+    local rel_path="${src_file#$examples_dir/}"
+    local dest_file="$hooks_dir/$rel_path"
+    local dest_dir="$(dirname "$dest_file")"
+
+    # Create destination directory if needed
+    [[ -d "$dest_dir" ]] || mkdir -p "$dest_dir"
+
+    # Only copy if destination doesn't exist
+    if [[ ! -e "$dest_file" ]]; then
+      cp "$src_file" "$dest_file"
+      chmod +x "$dest_file"
+      ((installed++))
+      if [[ "$QUIET" != true ]]; then
+        echo -e "  ${GREEN}+${NC} $rel_path"
+      fi
+    else
+      ((skipped++))
+    fi
+  done < <(find "$examples_dir" -type f ! -name "README*" -print0 2>/dev/null)
+
+  if [[ "$installed" -gt 0 ]]; then
+    echo -e "  ${GREEN}✓${NC} Installed $installed new hook(s)"
+  fi
+  if [[ "$skipped" -gt 0 ]]; then
+    echo -e "  ${DIM}Skipped $skipped existing hook(s)${NC}"
+  fi
+  if [[ "$installed" -eq 0 && "$skipped" -eq 0 ]]; then
+    echo -e "  ${DIM}No example hooks to install${NC}"
+  fi
+}
+
+install_hooks_overwrite() {
+  local hooks_dir="$1"
+  local examples_dir="$2"
+  local installed=0
+
+  # Backup existing hooks
+  local backup_dir="$HOME/.wt/hooks.backup.$(date +%Y%m%d_%H%M%S)"
+  local has_existing=false
+
+  # Check if there are files to backup
+  if [[ -n "$(find "$hooks_dir" -type f ! -name "README*" 2>/dev/null)" ]]; then
+    has_existing=true
+    mkdir -p "$backup_dir"
+
+    # Copy existing structure to backup
+    find "$hooks_dir" -type f ! -name "README*" -print0 2>/dev/null | while IFS= read -r -d '' file; do
+      local rel_path="${file#$hooks_dir/}"
+      local backup_file="$backup_dir/$rel_path"
+      mkdir -p "$(dirname "$backup_file")"
+      cp "$file" "$backup_file"
+    done
+
+    echo -e "  ${YELLOW}!${NC} Backed up existing hooks to:"
+    echo -e "    ${DIM}$backup_dir${NC}"
+
+    # Remove existing hooks (but keep directories)
+    find "$hooks_dir" -type f ! -name "README*" -delete 2>/dev/null
+  fi
+
+  # Install all examples
+  while IFS= read -r -d '' src_file; do
+    local rel_path="${src_file#$examples_dir/}"
+    local dest_file="$hooks_dir/$rel_path"
+    local dest_dir="$(dirname "$dest_file")"
+
+    [[ -d "$dest_dir" ]] || mkdir -p "$dest_dir"
+    cp "$src_file" "$dest_file"
+    chmod +x "$dest_file"
+    ((installed++))
+    if [[ "$QUIET" != true ]]; then
+      echo -e "  ${GREEN}+${NC} $rel_path"
+    fi
+  done < <(find "$examples_dir" -type f ! -name "README*" -print0 2>/dev/null)
+
+  if [[ "$installed" -gt 0 ]]; then
+    echo -e "  ${GREEN}✓${NC} Installed $installed hook(s)"
+  fi
+}
+
+check_path() {
+  # Check if INSTALL_DIR is in PATH
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    echo ""
+    echo -e "${YELLOW}Note:${NC} $INSTALL_DIR is not in your PATH."
+    echo ""
+    echo "Add this to your ~/.zshrc:"
+    echo ""
+    echo -e "  ${YELLOW}export PATH=\"$INSTALL_DIR:\$PATH\"${NC}"
+    echo ""
+  fi
+}
+
+check_completions_fpath() {
+  # Only needed for custom completions directory
+  if [[ "$COMPLETIONS_DIR" == "$HOME/.zsh/completions" ]]; then
+    echo ""
+    echo -e "${YELLOW}Note:${NC} Add completions to your ~/.zshrc:"
+    echo ""
+    echo -e "  ${YELLOW}fpath=(~/.zsh/completions \$fpath)${NC}"
+    echo -e "  ${YELLOW}autoload -Uz compinit && compinit${NC}"
+    echo ""
+  fi
+}
+
+print_success() {
   echo ""
   echo -e "${GREEN}Installation complete!${NC}"
   echo ""
-  echo -e "${BLUE}Next steps:${NC}"
+  echo -e "${BLUE}Verify installation:${NC}"
   echo ""
-  echo "1. Add completions to your ~/.zshrc (if not already there):"
-  echo ""
-  echo -e "   ${YELLOW}fpath=(~/.zsh/completions \$fpath)${NC}"
-  echo -e "   ${YELLOW}autoload -Uz compinit && compinit${NC}"
-  echo ""
-  echo "2. Reload your shell:"
-  echo ""
-  echo -e "   ${YELLOW}source ~/.zshrc${NC}"
-  echo ""
-  echo "3. Edit your config file:"
-  echo ""
-  echo -e "   ${YELLOW}$EDITOR ~/.wtrc${NC}"
-  echo ""
-  echo "4. Verify installation:"
-  echo ""
-  echo -e "   ${YELLOW}wt --version${NC}"
-  echo -e "   ${YELLOW}wt doctor${NC}"
+  echo -e "  ${YELLOW}wt --version${NC}"
+  echo -e "  ${YELLOW}wt doctor${NC}"
   echo ""
   echo -e "${BLUE}Quick start:${NC}"
   echo ""
-  echo -e "   ${YELLOW}wt clone git@github.com:your-org/your-app.git${NC}"
-  echo -e "   ${YELLOW}wt add your-app feature/my-feature${NC}"
-  echo -e "   ${YELLOW}cd \"\$(wt switch your-app)\"${NC}"
+  echo -e "  ${YELLOW}wt clone git@github.com:your-org/your-app.git${NC}"
+  echo -e "  ${YELLOW}wt add your-app feature/my-feature${NC}"
+  echo -e "  ${YELLOW}cd \"\$(wt switch your-app)\"${NC}"
+  echo ""
+  echo -e "${DIM}Updates: Pull this repo and changes are immediately available.${NC}"
   echo ""
 }
 
@@ -198,4 +473,8 @@ check_requirements
 install_script
 install_completions
 create_config
-print_next_steps
+create_hooks_dir
+install_example_hooks
+check_path
+check_completions_fpath
+print_success

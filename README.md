@@ -1,6 +1,37 @@
-# wt - Git Worktree Manager for Laravel Herd
+# wt - Git Worktree Manager
 
-A command-line tool for managing git worktrees with Laravel Herd integration. Work on multiple branches simultaneously without stashing or switching.
+A command-line tool for managing git worktrees with optional Laravel Herd integration. Work on multiple branches simultaneously without stashing or switching.
+
+**Framework-agnostic by design** - The core `wt` tool handles git worktree operations only. All framework-specific setup (Laravel, Node.js, etc.) is handled via customisable lifecycle hooks. Install the example hooks for Laravel projects, or create your own for any framework.
+
+## Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/dannyharding10/wt-worktree-manager.git ~/Projects/wt-worktree-manager
+
+# Run the installer
+cd ~/Projects/wt-worktree-manager && ./install.sh
+
+# Start a new terminal, then verify
+wt --version
+wt doctor
+```
+
+## Table of Contents
+
+- [What are Git Worktrees?](#what-are-git-worktrees)
+- [The Golden Rule](#️-the-golden-rule-one-branch-per-worktree)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Getting Started](#getting-started)
+- [Commands Reference](#commands-reference)
+- [Common Workflows](#common-workflows)
+- [Repository Structure](#repository-structure)
+- [Troubleshooting](#troubleshooting)
+- [Using with Claude Code](#using-wt-with-claude-code)
+
+---
 
 ## What are Git Worktrees?
 
@@ -131,52 +162,116 @@ git checkout feature/login              # Put the right branch back
 
 ## Installation
 
-### 1. Install the script
-
-The script is already at `~/bin/wt`. Make sure it's executable:
+### Using the Installer (Recommended)
 
 ```bash
-chmod +x ~/bin/wt
+# Clone the repository
+git clone https://github.com/dannyharding10/wt-worktree-manager.git ~/Projects/wt-worktree-manager
+
+# Run the installer
+cd ~/Projects/wt-worktree-manager
+./install.sh
 ```
 
-Ensure `~/bin` is in your PATH. Add to `~/.zshrc` if needed:
+The installer will:
+1. Check requirements (git, zsh, and optional tools)
+2. Create symlink at `/usr/local/bin/wt`
+3. Install zsh completions to Homebrew's site-functions
+4. Create `~/.wtrc` config file (if it doesn't exist)
+5. Create `~/.wt/hooks/` directory structure for lifecycle hooks
+6. Install example hooks (interactive choice for existing installs)
+
+Open a **new terminal** after installation for changes to take effect.
+
+### Installer Options
+
+The installer is **idempotent** - you can run it again to update or install new example hooks.
 
 ```bash
-export PATH="$HOME/bin:$PATH"
+# Interactive mode (default) - prompts when hooks already exist
+./install.sh
+
+# Merge mode - add new example hooks, keep your existing ones
+./install.sh --merge
+
+# Overwrite mode - replace all hooks with examples (backs up existing)
+./install.sh --overwrite
+
+# Skip hooks - don't install or modify any hooks
+./install.sh --skip-hooks
+
+# Quiet mode - minimal output
+./install.sh --quiet
+
+# Show help
+./install.sh --help
 ```
 
-### 2. Install fzf (optional but recommended)
+**Hook installation modes:**
 
-fzf enables interactive branch selection:
+| Mode | Behaviour |
+|------|-----------|
+| Interactive | Fresh install: installs all examples. Existing hooks: prompts for choice |
+| `--merge` | Only copies new example hooks, preserves your existing hooks |
+| `--overwrite` | Backs up existing hooks to `~/.wt/hooks.backup.<timestamp>/`, then installs all examples |
+| `--skip-hooks` | Doesn't touch hooks at all |
+
+### What Gets Installed
+
+| Location | Purpose |
+|----------|---------|
+| `/usr/local/bin/wt` | Main executable (symlink to repo) |
+| `/opt/homebrew/share/zsh/site-functions/_wt` | Tab completions (symlink to repo) |
+| `~/.wtrc` | Your configuration file |
+| `~/.wt/hooks/` | Lifecycle hooks directory |
+
+Because the installed files are symlinks, pulling updates to the repo automatically updates the tool.
+
+### Manual Installation
+
+If you prefer not to use the installer:
+
+```bash
+# Clone the repo
+git clone https://github.com/dannyharding10/wt-worktree-manager.git ~/Projects/wt-worktree-manager
+
+# Symlink the script
+sudo ln -sf ~/Projects/wt-worktree-manager/wt /usr/local/bin/wt
+
+# Symlink completions (Apple Silicon Mac)
+ln -sf ~/Projects/wt-worktree-manager/_wt /opt/homebrew/share/zsh/site-functions/_wt
+
+# Create config
+cp ~/Projects/wt-worktree-manager/.wtrc.example ~/.wtrc
+
+# Create hooks directory
+mkdir -p ~/.wt/hooks/post-add.d
+```
+
+### Install fzf (Recommended)
+
+fzf enables interactive branch selection with fuzzy search:
 
 ```bash
 brew install fzf
 ```
 
-### 3. Set up autocompletion
-
-Copy the completion script and configure zsh:
+### Uninstalling
 
 ```bash
-# Create completions directory
-mkdir -p ~/.zsh/completions
-
-# Copy the completion script
-cp ~/bin/_wt ~/.zsh/completions/
-
-# Add to ~/.zshrc (if not already there):
-echo 'fpath=(~/.zsh/completions $fpath)' >> ~/.zshrc
-echo 'autoload -Uz compinit && compinit' >> ~/.zshrc
-
-# Reload shell
-source ~/.zshrc
+cd ~/Projects/wt-worktree-manager
+./uninstall.sh
 ```
 
-Now you can use Tab to complete commands, repos, and branches:
+This removes symlinks but preserves your config (`~/.wtrc`), hooks (`~/.wt/`), repositories, and worktrees.
+
+### Tab Completion
+
+After installation, tab completion works automatically:
 
 ```bash
-wt pu<Tab>        # completes to 'pull' or 'pull-all'
-wt pull sc<Tab>   # completes to 'scooda'
+wt pu<Tab>             # completes to 'pull' or 'pull-all'
+wt pull sc<Tab>        # completes to 'scooda'
 wt pull scooda f<Tab>  # completes to available branches
 ```
 
@@ -291,6 +386,20 @@ fi
 └── 03-run-migrations.sh
 ```
 
+**Repo-specific hooks:** Create subdirectories matching repo names for hooks that only run for specific repositories:
+
+```text
+~/.wt/hooks/post-add.d/
+├── 01-npm-install.sh       # Global - runs for ALL repos
+├── 02-build-assets.sh      # Global
+├── scooda/                 # Only runs for 'scooda' repo
+│   └── 01-import-ai.sh
+└── myapp/                  # Only runs for 'myapp' repo
+    └── 01-seed-database.sh
+```
+
+Execution order: global hooks run first (alphabetically), then repo-specific hooks.
+
 **Security:** Hooks are verified before execution - they must be owned by the current user and not be world-writable.
 
 ## Getting Started
@@ -352,6 +461,7 @@ wt rm myapp        # Pick which one to remove
 ```bash
 # Setup
 wt clone <git-url>              # Clone as bare repo (auto-creates staging)
+wt clone <git-url> <name> <branch>  # Clone and create specific worktree
 wt add <repo> <branch>          # Create worktree
 wt repos                        # List all repositories
 wt doctor                       # Check system requirements
@@ -396,7 +506,7 @@ wt unlock <repo>                # Remove stale git lock files
 | `wt rm <repo> [branch]` | Remove a worktree |
 | `wt ls <repo>` | List all worktrees with status |
 | `wt repos` | List all repositories in HERD_ROOT |
-| `wt clone <url> [name]` | Clone as bare repo (auto-creates staging) |
+| `wt clone <url> [name] [branch]` | Clone as bare repo (create specific worktree) |
 
 #### The `repos` command
 
@@ -500,13 +610,17 @@ wt add myapp feature/new-work origin/main
 2. If using `origin/...` as base, explicitly fetches that branch with `--force` to ensure it's up-to-date
 3. Creates the worktree directory at `~/Herd/<repo>--<branch-slug>/`
 4. **Pushes new branch to remote and sets up tracking** (prevents accidental pushes to wrong branch)
-5. Copies `.env.example` to `.env` (if exists)
-6. Sets `APP_URL` in `.env` to `https://<repo>--<branch-slug>.test`
-7. Creates a MySQL database named `<repo>__<branch_slug>` (underscores for MySQL compatibility)
-8. Sets `DB_DATABASE` in `.env` to the new database name
+5. Runs `post-add` lifecycle hooks (see below)
+
+**With the example Laravel hooks installed, it also:**
+
+6. Copies `.env.example` to `.env`
+7. Sets `APP_URL` and `DB_DATABASE` in `.env`
+8. Creates a MySQL database named `<repo>__<branch_slug>`
 9. Secures the site with HTTPS via `herd secure`
-10. Runs `composer install`
-11. Generates Laravel app key
+10. Runs `composer install` and generates app key
+11. Runs `npm install` and `npm run build`
+12. Runs Laravel migrations
 
 **Database naming:** Branch slashes become underscores, dashes become underscores:
 - `myapp` + `feature/login` → `myapp__feature_login`
@@ -540,11 +654,17 @@ wt rm -f --delete-branch myapp feature/done
 
 **What it does automatically:**
 
-1. **Backs up the database** to `$DB_BACKUP_DIR/<repo>/<db_name>_<timestamp>.sql`
-2. **Unsecures the site** via `herd unsecure`
-3. Removes the worktree directory
-4. Optionally deletes the local branch (with `--delete-branch`)
-5. Prunes stale worktree references
+1. Runs `pre-rm` lifecycle hooks (can abort removal)
+2. Removes the worktree directory
+3. Optionally deletes the local branch (with `--delete-branch`)
+4. Prunes stale worktree references
+5. Runs `post-rm` lifecycle hooks
+
+**With the example Laravel hooks installed, it also:**
+
+- Backs up the database to `$DB_BACKUP_DIR/<repo>/<db_name>_<timestamp>.sql` (skip with `--no-backup`)
+- Unsecures the site via `herd unsecure`
+- Drops the database (only with `--drop-db` flag)
 
 **Backup location:**
 ```text
@@ -795,7 +915,7 @@ Displays the last 15 commits in a compact one-line format with relative dates.
 
 | Command | Description |
 |---------|-------------|
-| `wt clone <url> [name]` | Clone as bare repo (auto-creates staging) |
+| `wt clone <url> [name] [branch]` | Clone as bare repo (create specific worktree) |
 | `wt prune <repo>` | Clean up stale worktrees and merged branches |
 | `wt exec <repo> <branch> <cmd>` | Run command in worktree |
 | `wt health <repo>` | Check repository health |
@@ -806,14 +926,20 @@ Displays the last 15 commits in a compact one-line format with relative dates.
 
 #### The `clone` command
 
-Clones a repository as a bare repo and automatically creates a staging worktree.
+Clones a repository as a bare repo and creates an initial worktree.
 
 ```bash
-# Clone with auto-detected name
+# Clone with auto-detected name (creates staging/main/master worktree)
 wt clone git@github.com:your-org/your-app.git
 
 # Clone with custom name
 wt clone git@github.com:your-org/your-app.git myapp
+
+# Clone and create worktree for specific existing branch
+wt clone git@github.com:your-org/your-app.git myapp feature/auth
+
+# Clone and create new feature branch (based on staging/main/master)
+wt clone git@github.com:your-org/your-app.git myapp feature/new-dashboard
 ```
 
 **What it does:**
@@ -821,16 +947,21 @@ wt clone git@github.com:your-org/your-app.git myapp
 1. Clones as a bare repository to `~/Herd/<repo>.git/`
 2. Configures fetch to get all branches
 3. Fetches all remote branches
-4. **Automatically creates a worktree** for the first available branch: `staging`, `main`, or `master`
+4. Creates the initial worktree:
+   - If `[branch]` specified and exists on remote: creates worktree for that branch
+   - If `[branch]` specified but doesn't exist: creates new branch from staging/main/master
+   - If no branch specified: auto-creates worktree for staging, main, or master (first found)
 
-This means after cloning you can immediately start working:
+This means you can clone and start working on a specific feature immediately:
 
 ```bash
-wt clone git@github.com:your-org/your-app.git
-wt code your-app staging  # Ready to go!
-```
+# Start working on an existing feature
+wt clone git@github.com:your-org/your-app.git myapp feature/auth
+cd "$(wt cd myapp feature/auth)"
 
-To skip auto-creation, you can manually remove the worktree or set up your preferred branch.
+# Or start a new feature
+wt clone git@github.com:your-org/your-app.git myapp feature/new-work
+```
 
 #### The `exec` command
 
@@ -1117,6 +1248,97 @@ for branch in staging feature/login feature/dashboard; do
 done
 ```
 
+## Repository Structure
+
+This section describes the files in the wt-worktree-manager repository itself.
+
+```text
+wt-worktree-manager/
+│
+├── wt                          # Main script - the worktree manager (87KB)
+├── _wt                         # Zsh tab completion definitions
+│
+├── install.sh                  # Installer - sets up symlinks, config, hooks
+├── uninstall.sh                # Uninstaller - removes symlinks, preserves data
+│
+├── .wtrc.example               # Example configuration file
+├── README.md                   # This documentation
+├── CHANGELOG.md                # Version history and release notes
+├── CONTRIBUTING.md             # Contribution guidelines
+├── LICENSE                     # MIT license
+│
+└── examples/
+    └── hooks/                  # Example lifecycle hooks
+        ├── README.md           # Comprehensive hooks documentation
+        ├── post-add.d/         # Scripts run after worktree creation
+        │   ├── 00-register-project.sh
+        │   ├── 01-copy-env.sh
+        │   ├── 02-configure-env.sh
+        │   ├── 03-create-database.sh
+        │   ├── 04-herd-secure.sh
+        │   ├── 05-composer-install.sh
+        │   ├── 06-npm-install.sh
+        │   ├── 07-build-assets.sh
+        │   ├── 08-run-migrations.sh
+        │   └── myapp/          # Repo-specific hooks example
+        │       ├── 01-symlink-env.sh
+        │       ├── 02-import-database.sh
+        │       └── 03-seed-data.sh
+        ├── pre-rm.d/
+        │   └── 01-backup-database.sh
+        └── post-rm.d/
+            ├── 01-herd-unsecure.sh
+            └── 02-drop-database.sh
+```
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `wt` | The main executable containing all commands |
+| `_wt` | Zsh completion script for tab completion |
+| `install.sh` | Sets up symlinks, creates config and hooks directory |
+| `uninstall.sh` | Removes symlinks, preserves user data |
+| `.wtrc.example` | Template for `~/.wtrc` configuration |
+| `examples/hooks/` | Example lifecycle hooks you can copy to `~/.wt/hooks/` |
+
+### User Data Locations
+
+After installation, your personal data lives in these locations:
+
+| Location | Purpose | Backed up? |
+|----------|---------|------------|
+| `~/.wtrc` | Your configuration (HERD_ROOT, editor, database settings) | You should |
+| `~/.wt/hooks/` | Your lifecycle hooks (post-add, post-rm, etc.) | You should |
+| `~/Herd/*.git/` | Your bare git repositories | Git remote |
+| `~/Herd/*/` | Your worktrees (working directories) | Git remote |
+
+### Installing Example Hooks
+
+The installer handles hook installation. For existing installations, re-run it with `--merge`:
+
+```bash
+# Add new example hooks without overwriting your existing ones
+cd ~/Projects/wt-worktree-manager
+./install.sh --merge
+
+# Or replace all hooks (backs up existing to ~/.wt/hooks.backup.<timestamp>/)
+./install.sh --overwrite
+```
+
+You can also copy specific hooks manually:
+
+```bash
+# Copy a specific hook
+cp ~/Projects/wt-worktree-manager/examples/hooks/post-add.d/03-create-database.sh ~/.wt/hooks/post-add.d/
+
+# Create repo-specific hooks
+mkdir -p ~/.wt/hooks/post-add.d/myapp
+cp ~/Projects/wt-worktree-manager/examples/hooks/post-add.d/myapp/* ~/.wt/hooks/post-add.d/myapp/
+```
+
+See [examples/hooks/README.md](examples/hooks/README.md) for detailed hook documentation.
+
 ## Troubleshooting
 
 ### "Bare repo not found"
@@ -1273,15 +1495,39 @@ MySQL database names are limited to 64 characters. If your repo + branch name ex
 
 ## Version
 
-Current version: **3.6.0**
+Current version: **3.7.0**
 
 Check with: `wt --version`
+
+### What's New in 3.7.0
+
+**Generic worktree manager:**
+- `wt` is now framework-agnostic - all Laravel-specific functionality has been moved to optional hooks
+- Core tool handles only git worktree operations (create, remove, sync, pull, status)
+- Install example hooks for Laravel projects, or create custom hooks for any framework
+
+**Hook-based architecture:**
+- Comprehensive example hooks for Laravel: env setup, database creation, Herd securing, composer/npm install, migrations
+- Repo-specific hooks via subdirectories (e.g., `post-add.d/myapp/` runs only for `myapp` repo)
+- Hook control flags: `WT_SKIP_DB`, `WT_SKIP_COMPOSER`, `WT_SKIP_NPM`, etc.
+- Per-repository config files: `~/Herd/repo.git/.wtconfig`
+
+**Bug fixes:**
+- Fixed hooks not running (zsh glob qualifier order)
+- Fixed URL generation to include repository name
+- Fixed per-repo config loading for `DEFAULT_BASE`
+
+**Installer improvements:**
+- `--merge` mode: Add new hooks without overwriting existing ones
+- `--overwrite` mode: Replace all hooks (backs up first)
+- `--skip-hooks` mode: Skip hook installation entirely
 
 ### What's New in 3.6.0
 
 **New commands:**
 - **`wt health <repo>`** - Check repository health (stale worktrees, orphaned databases, missing .env files, branch mismatches)
 - **`wt report <repo>`** - Generate markdown status report with worktree summary, status, and hook availability
+- **`wt clone` branch argument** - Clone and immediately create worktree for a specific branch: `wt clone <url> [name] [branch]`
 
 **New lifecycle hooks:**
 - **`pre-add`** - Runs before worktree creation (can abort with non-zero exit)
