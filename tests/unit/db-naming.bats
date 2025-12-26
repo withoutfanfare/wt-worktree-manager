@@ -55,15 +55,14 @@ teardown() {
   [ "$result" = "myapp__feature_short" ]
 }
 
-@test "db_name_for: exactly 64 chars stays unchanged" {
-  # Create a name that's exactly 64 chars
-  # repo (10) + __ (2) + branch_slug (52) = 64
+@test "db_name_for: names near 64 char limit are within bounds" {
+  # Test that names around the MySQL 64-char limit are handled properly
   repo="myapp12345"
   branch="feature/this-is-a-very-long-branch-name-exactly-fifty"
 
   result="$(db_name_for "$repo" "$branch")"
 
-  # Should be truncated with hash if over 64
+  # Result must always be within MySQL's 64-char limit
   [ ${#result} -le 64 ]
 }
 

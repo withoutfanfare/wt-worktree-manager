@@ -17,6 +17,9 @@ cmd_templates() {
     return 0
   fi
 
+  # Validate template name first (security: prevent path traversal)
+  validate_template_name "$template_name"
+
   # Show specific template details
   local template_file="$WT_TEMPLATES_DIR/${template_name}.conf"
 
@@ -30,7 +33,7 @@ cmd_templates() {
   print -r -- ""
 
   # Extract description
-  local desc; desc="$(grep '^TEMPLATE_DESC=' "$template_file" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'")"
+  local desc; desc="$(extract_template_desc "$template_file")"
   if [[ -n "$desc" ]]; then
     print -r -- "${C_DIM}Description:${C_RESET} $desc"
     print -r -- ""

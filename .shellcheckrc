@@ -1,7 +1,9 @@
 # ShellCheck configuration for wt-worktree-manager
 # https://www.shellcheck.net/wiki/
 
-# The script is zsh, not bash
+# The scripts are written for zsh. ShellCheck doesn't fully support zsh,
+# so we use 'shell=bash' as the closest approximation for linting.
+# Many zsh-specific warnings are disabled below.
 shell=bash
 
 # Disable specific warnings that don't apply to zsh or are intentional

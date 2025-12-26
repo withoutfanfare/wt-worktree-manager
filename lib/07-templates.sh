@@ -18,6 +18,13 @@ validate_template_name() {
   fi
 }
 
+# Extract TEMPLATE_DESC from a template file
+# Usage: extract_template_desc "/path/to/template.conf"
+extract_template_desc() {
+  local file="$1"
+  grep '^TEMPLATE_DESC=' "$file" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"'"
+}
+
 # Find similar names for "did you mean?" suggestions
 # Usage: suggest_similar <input> <type> <list_of_options>
 # Returns the closest match or empty string
@@ -158,7 +165,7 @@ list_templates() {
       local desc=""
 
       # Extract TEMPLATE_DESC if present
-      desc="$(grep '^TEMPLATE_DESC=' "$f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'")"
+      desc="$(extract_template_desc "$f")"
 
       if [[ -n "$desc" ]]; then
         print -r -- "  $name - $desc"
@@ -199,16 +206,26 @@ format_json() {
     return
   fi
 
-  # Use sed for basic pretty-printing with colour codes
-  # Keys in cyan, strings in green, numbers in yellow, booleans in magenta, brackets in white
+  # Use jq or python3 for proper JSON formatting if available, with fallback to simple approach
   local result="$json"
+  local formatted=""
 
-  # Add newlines and indentation
-  result="${result//\[/$'\n['}"
-  result="${result//\{/$'\n  {'}"
-  result="${result//\}/$'}\n'}"
-  result="${result//\],/$'],\n'}"
-  result="${result//\}, /'},\n  '}"
+  if command -v jq >/dev/null 2>&1; then
+    if formatted="$(print -r -- "$json" | jq . 2>/dev/null)"; then
+      result="$formatted"
+    fi
+  elif command -v python3 >/dev/null 2>&1; then
+    if formatted="$(print -r -- "$json" | python3 -m json.tool 2>/dev/null)"; then
+      result="$formatted"
+    fi
+  else
+    # Fallback: simple string replacements for basic formatting
+    result="${result//\[/$'\n['}"
+    result="${result//\{/$'\n  {'}"
+    result="${result//\}/$'}\n'}"
+    result="${result//\],/$'],\n'}"
+    result="${result//\}, /'},\n  '}"
+  fi
 
   # Apply colours if terminal supports it
   if [[ -t 1 ]]; then
