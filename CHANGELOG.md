@@ -7,6 +7,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2025-12-25
+
+### Added
+
+#### Code Modularisation
+- **Modular architecture** - The 3,162-line monolithic script has been refactored into 18 focused modules in `lib/` for better maintainability
+- **Build system** - `build.sh` concatenates modules into a single `wt` file for distribution
+- **Module structure**:
+  - `lib/00-header.sh` - Version, global defaults, flags
+  - `lib/01-core.sh` - Config loading, colours, output helpers
+  - `lib/02-validation.sh` - Input validation, security checks
+  - `lib/03-paths.sh` - Path resolution, URL generation
+  - `lib/04-git.sh` - Git operations, branch helpers
+  - `lib/05-database.sh` - MySQL operations
+  - `lib/06-hooks.sh` - Hook system with security verification
+  - `lib/07-templates.sh` - Template loading
+  - `lib/08-spinner.sh` - Progress indicators
+  - `lib/09-parallel.sh` - Parallel execution framework
+  - `lib/10-interactive.sh` - Interactive wizard
+  - `lib/11-resilience.sh` - Retry logic, transactions, lock cleanup
+  - `lib/commands/*.sh` - Command implementations
+
+#### Interactive Mode
+- **`wt add --interactive` / `-i`** - Guided worktree creation wizard with 5 steps:
+  1. Repository selection (fzf picker)
+  2. Base branch selection (fzf picker)
+  3. Branch name input with live preview (path, URL, database)
+  4. Template selection (optional fzf picker)
+  5. Confirmation with full summary
+- Requires fzf to be installed
+
+#### Progress Indicators
+- **Spinner animation** - Braille-pattern spinner for long operations
+- `spinner_start "message"` / `spinner_stop "ok|fail|skip"` - Background spinner control
+- `with_spinner "message" command...` - Wrap commands with progress indication
+- Step progress indicator for multi-step operations
+
+#### Parallel Operations
+- **`wt build-all <repo>`** - Run `npm run build` on all worktrees
+- **`wt exec-all <repo> <command>`** - Execute any command across all worktrees
+- Configurable concurrency via `WT_MAX_PARALLEL` environment variable (default: 4)
+
+#### Resilience Improvements
+- **`wt repair [repo]`** - Scan for and fix common issues:
+  - Prunes orphaned worktree entries
+  - Removes stale git index locks
+  - Checks for missing `.git` files in worktrees
+- **Retry logic** - `with_retry <max_attempts> <command>` with exponential backoff
+- **Transaction pattern** - Rollback support for failed multi-step operations
+- **Disk space checks** - Pre-flight checks before operations
+- **Lock cleanup** - Automatic detection and removal of stale index locks (>5 min old)
+
+### Changed
+- **Version 4.0.0** - Major version bump for architectural changes
+- **Help text** - Updated to show new commands and flags
+- **Default parallel limit** - 4 concurrent operations (configurable via `WT_MAX_PARALLEL`)
+
+### Removed
+- **`wt fresh-all`** - Removed due to destructive nature (runs `migrate:fresh` on all worktrees). Use `wt exec-all <repo> "php artisan migrate:fresh --seed"` if needed.
+
+### Developer Notes
+- Modules are sourced in dependency order (00 through 99)
+- Each module is self-contained with its shebang stripped during build
+- Tests continue to work against the built `wt` file
+- Development workflow: edit modules in `lib/`, run `./build.sh`, test with `./wt`
+
+## [3.9.0] - 2025-12-25
+
+### Added
+- **`--dry-run` flag for `wt add`** - Preview worktree creation without executing (shows path, URL, database, template settings)
+- **`--pretty` flag for JSON output** - Colourised, formatted JSON output for better readability
+- **Template listing in help** - Available templates now shown when running `wt --help`
+- **"Did you mean?" suggestions** - Helpful suggestions when template names are mistyped
+- **Shellcheck integration** - Run `./run-tests.sh lint` for static analysis
+- **19 new integration tests** - Command-line parsing, help output, and validation tests
+- **187 total tests** - Expanded from 168 to 187 tests
+
+### Changed
+- **Consolidated validation functions** - `validate_identifier_common()` helper reduces code duplication
+- **Better error messages** - Template not found errors now suggest similar names
+- **Help text improvements** - New flags documented, template usage examples added
+
+### Fixed
+- Empty validation in both repo/branch and template name validation now checked first
+
+## [3.8.1] - 2025-12-25
+
+### Security
+- **Template path traversal prevention** - Template names are now validated to prevent path traversal attacks (e.g., `../etc/passwd`)
+- **Template variable injection prevention** - `WT_SKIP_*` variables in templates now only accept `true` or `false` values, preventing command injection
+- **Template flag validation** - `--template` and `-t` flags now validate that a non-empty template name is provided
+
+### Fixed
+- **Date calculation edge cases** - Future timestamps (from clock skew) are now handled gracefully in age calculations
+- **JSON escaping completeness** - Added escaping for `\r`, `\f`, `\b` control characters
+
+### Added
+- **Template security tests** - 28 new tests covering path traversal, injection attacks, and input validation
+- **168 total tests** - Expanded test suite from 137 to 168 tests
+
+### Changed
+- Template name validation now checks for empty names before other validation rules
+
+## [3.8.0] - 2025-12-25
+
+### Added
+
+#### Automated Testing Framework
+- **BATS test suite** - Comprehensive automated tests using Bash Automated Testing System
+- **137 unit tests** covering:
+  - Input validation (`validate_name`) - security-critical path traversal, git flag injection
+  - Branch slugification (`slugify_branch`, `extract_feature_name`)
+  - Database naming (`db_name_for`) - MySQL 64-char limit, hash suffix
+  - URL generation (`url_for`, `wt_path_for`)
+  - JSON escaping (`json_escape`)
+  - Config parsing security (whitelist enforcement)
+- Run tests with `./run-tests.sh` or `./run-tests.sh unit` / `./run-tests.sh integration`
+
+#### Enhanced Status Dashboard
+- **AGE column** - Shows human-readable age of last commit (1d, 2w, 3mo, 1y)
+- **MERGED column** - Shows ✓ if branch is fully merged into base, - if not
+- **STALE indicator** - Red 🔴 marker for branches >50 commits behind base
+- **Inactive highlighting** - Yellow age display for branches >30 days since last commit
+- **JSON output** - `wt status <repo> --json` for scripting with new fields: `stale`, `age`, `age_days`, `merged`
+
+#### Worktree Templates
+- **`wt templates`** - List available templates with descriptions
+- **`wt templates <name>`** - View detailed template configuration
+- **`wt add --template=<name>`** or `-t <name>` - Apply template when creating worktree
+- **Template format** - Simple key=value files in `~/.wt/templates/` that set `WT_SKIP_*` variables
+- **Example templates included**:
+  - `laravel.conf` - Full Laravel setup (database, composer, npm, migrations)
+  - `node.conf` - Node.js projects (npm only, skip PHP/database)
+  - `minimal.conf` - Git worktree only, skip all setup hooks
+  - `backend.conf` - Backend API work (PHP + database, skip npm/build)
+
+### Changed
+- Version bump to 3.8.0
+
 ## [3.7.0] - 2025-12-25
 
 ### Changed
