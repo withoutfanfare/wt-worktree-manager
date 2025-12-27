@@ -20,18 +20,26 @@ wt doctor
 
 ## Table of Contents
 
+- [Tutorials (Onboarding + Recipes)](TUTORIALS.md)
 - [What are Git Worktrees?](#what-are-git-worktrees)
 - [The Golden Rule](#️-the-golden-rule-one-branch-per-worktree)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Getting Started](#getting-started)
 - [Commands Reference](#commands-reference)
+- [Dashboard and Monitoring](#dashboard-and-monitoring)
+- [Health Score System](#health-score-system)
+- [Branch Aliases](#branch-aliases)
+- [Multi-Repository Operations](#multi-repository-operations)
+- [Branch Naming Validation](#branch-naming-validation)
+- [Self-Update](#self-update)
 - [Worktree Templates](#worktree-templates)
-- [Repository Structure](#repository-structure)
 - [Testing](#testing)
 - [Developer Guide](#developer-guide)
 - [Security](#security)
 - [Common Workflows](#common-workflows)
+- [Directory Structure](#directory-structure)
+- [Repository Structure](#repository-structure)
 - [Troubleshooting](#troubleshooting)
 - [Using with Claude Code](#using-wt-with-claude-code)
 
@@ -165,6 +173,41 @@ git checkout feature/login              # Put the right branch back
 ```
 
 ## Installation
+
+### Platform Support
+
+| Platform | Status |
+|----------|--------|
+| **macOS** | ✅ Fully supported |
+| **Linux** | 🚧 Planned (see [ROADMAP](ROADMAP.md)) |
+| **Windows** | 🚧 Planned via WSL (see [ROADMAP](ROADMAP.md)) |
+
+### Dependencies
+
+The installer will check for these dependencies and show installation instructions for any that are missing.
+
+**Required:**
+
+| Dependency | Purpose | Installation |
+|------------|---------|--------------|
+| `zsh` | Shell interpreter (wt is written in zsh) | Pre-installed on macOS |
+| `git` | Version control | `xcode-select --install` (macOS) |
+
+**Optional (for full functionality):**
+
+| Dependency | Purpose | Installation |
+|------------|---------|--------------|
+| `fzf` | Interactive selection (`wt add -i`, `wt switch`) | `brew install fzf` |
+| `jq` | Pretty JSON output (`--pretty` flag) | `brew install jq` |
+| `mysql` | Database creation/backup in hooks | `brew install mysql` |
+
+**Framework-specific (for hooks):**
+
+| Dependency | Purpose | Installation |
+|------------|---------|--------------|
+| `herd` | Laravel Herd HTTPS sites | [Laravel Herd](https://herd.laravel.com) |
+| `composer` | PHP dependency management | `brew install composer` |
+| `npm` | Node.js package management | Included with Node.js |
 
 ### Using the Installer (Recommended)
 
@@ -330,6 +373,8 @@ These can be set in your shell or config file:
 | `WT_PROTECTED_BRANCHES` | `staging main master` | Space-separated list of protected branches |
 | `WT_HOOKS_DIR` | `~/.wt/hooks` | Directory for hook scripts |
 | `WT_URL_SUBDOMAIN` | (empty) | Optional subdomain prefix (e.g., `api` → `api.feature.test`) |
+| `WT_MAX_PARALLEL` | `4` | Maximum concurrent parallel operations |
+| `BRANCH_PATTERN` | (empty) | Regex pattern for branch name validation |
 
 ### Hooks
 
@@ -477,10 +522,16 @@ wt code <repo>                  # Open in editor (fzf picker)
 wt open <repo>                  # Open in browser (fzf picker)
 cd "$(wt cd <repo> <branch>)"   # Navigate to worktree
 
+# Monitoring (v4.0.0)
+wt dashboard                    # Visual overview of all repos
+wt info <repo> [branch]         # Detailed worktree information
+wt recent [limit]               # Recently accessed worktrees
+wt status <repo>                # Dashboard view with health grades
+wt health <repo>                # Health scores for all worktrees
+
 # Stay updated
 wt pull-all <repo>              # Pull all worktrees (parallel)
 wt sync <repo> <branch>         # Rebase onto staging
-wt status <repo>                # Dashboard view
 wt log <repo> <branch>          # Show recent commits
 
 # Laravel shortcuts
@@ -491,12 +542,19 @@ wt tinker <repo> <branch>       # Open tinker
 # Parallel operations (v4.0.0)
 wt build-all <repo>             # npm run build on all worktrees
 wt exec-all <repo> <cmd>        # Run command on all worktrees
+wt pull-all --all-repos         # Pull all worktrees in all repos
+
+# Branch aliases (v4.0.0)
+wt alias set <name> <repo> <branch>  # Create shortcut
+wt alias list                   # Show all aliases
+wt alias remove <name>          # Delete an alias
 
 # Cleanup
 wt rm <repo> <branch>           # Remove worktree (backs up DB)
 wt rm --drop-db <repo> <branch> # Remove and drop database
 wt rm --no-backup <repo> <branch> # Remove without backup
 wt prune -f <repo>              # Delete merged branches
+wt clean <repo>                 # Remove node_modules/vendor from inactive
 
 # Maintenance
 wt health <repo>                # Check repository health
@@ -504,6 +562,10 @@ wt report <repo>                # Generate markdown status report
 wt repair [repo]                # Fix orphaned worktrees, stale locks
 wt cleanup-herd                 # Remove orphaned Herd nginx configs
 wt unlock <repo>                # Remove stale git lock files
+
+# Self-update (v4.0.0)
+wt version --check              # Check for updates
+wt upgrade                      # Update to latest version
 ```
 
 ## Commands Reference
@@ -522,6 +584,13 @@ wt unlock <repo>                # Remove stale git lock files
 | `wt repos` | List all repositories in HERD_ROOT |
 | `wt templates [name]` | List templates or show template details |
 | `wt clone <url> [name] [branch]` | Clone as bare repo (create specific worktree) |
+| `wt dashboard` | Visual overview of all repositories **(v4.0.0)** |
+| `wt info <repo> [branch]` | Detailed worktree information **(v4.0.0)** |
+| `wt recent [limit]` | List recently accessed worktrees **(v4.0.0)** |
+| `wt clean <repo>` | Remove node_modules/vendor from inactive worktrees **(v4.0.0)** |
+| `wt alias <subcommand>` | Manage branch aliases **(v4.0.0)** |
+| `wt upgrade` | Self-update to latest version **(v4.0.0)** |
+| `wt version --check` | Check for available updates **(v4.0.0)** |
 
 #### The `repos` command
 
@@ -1139,6 +1208,8 @@ Generated: 2025-12-24 10:30:00
 | `--delete-branch` | Delete branch when removing worktree |
 | `--drop-db` | Drop database after backup (with `rm`) |
 | `--no-backup` | Skip database backup (with `rm`) |
+| `--all-repos` | Apply operation to all repositories **(v4.0.0)** |
+| `--check` | Check for updates (with `version` command) **(v4.0.0)** |
 | `-v, --version` | Show version |
 | `-h, --help` | Show help |
 
@@ -1161,7 +1232,491 @@ wt prune myapp -f        # ✔
 | `prune` | `-f` (actually delete merged branches) |
 | `repos` | `--json` |
 | `templates` | View template details |
+| `pull-all` | `--all-repos` (operate on all repositories) |
+| `build-all` | `--all-repos` (operate on all repositories) |
+| `exec-all` | `--all-repos` (operate on all repositories) |
+| `clean` | `-f` (skip confirmation) |
+| `version` | `--check` (check for updates) |
 | All | `-q` (quiet mode) |
+
+---
+
+## Dashboard and Monitoring
+
+v4.0.0 introduces powerful monitoring commands to give you a bird's-eye view of all your repositories and worktrees.
+
+### The `dashboard` Command
+
+Get a visual overview of all repositories with health grades, worktree counts, and status indicators.
+
+```bash
+wt dashboard
+```
+
+Output:
+```text
+╔════════════════════════════════════════════════════════════════════╗
+║                    wt Dashboard                                    ║
+╚════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ myapp                                           3 worktrees    A     │
+├──────────────────────────────────────────────────────────────────────┤
+│   staging              A    ●                                        │
+│   feature/login        B    ◐ 3                                      │
+│   feature/dashboard    A    ●                                        │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ otherapp                                        1 worktrees    C     │
+├──────────────────────────────────────────────────────────────────────┤
+│   main                 C    ●  (12 behind)                           │
+└──────────────────────────────────────────────────────────────────────┘
+
+Summary: 2 repos, 4 worktrees, 1 dirty, 0 stale
+```
+
+**What the dashboard shows:**
+
+| Element | Meaning |
+|---------|---------|
+| Repository name | The bare repo name (e.g., `myapp`) |
+| Worktree count | Number of active worktrees for this repo |
+| Average grade | Health grade averaged across all worktrees (A-F) |
+| Per-worktree status | Branch name, health grade, dirty state, sync status |
+
+**Health grades are colour-coded:**
+- **Green** (A, B) - Healthy worktrees
+- **Yellow** (C, D) - Needs attention
+- **Red** (F) - Significant issues
+
+### The `info` Command
+
+Get detailed information about a specific worktree.
+
+```bash
+# Show info for a specific worktree
+wt info myapp feature/login
+
+# Use fzf picker
+wt info myapp
+```
+
+Output:
+```text
+📋 Worktree Info: myapp / feature/login
+
+Path:       /Users/you/Herd/myapp--feature-login
+URL:        https://feature-login.test
+Database:   myapp__feature_login
+Branch:     feature/login
+SHA:        a1b2c3d4
+
+Health Score: 85/100 (B)
+  ├─ Commits behind base: -10 (5 commits behind origin/staging)
+  ├─ Uncommitted changes: -5 (3 files modified)
+  ├─ Days since commit:   0 (committed today)
+  ├─ Merge status:        0 (no conflicts)
+  └─ Untracked files:     0 (none)
+
+Sync Status:
+  ├─ Ahead:  2 commits
+  └─ Behind: 5 commits (vs origin/staging)
+
+Last Commit: Fix login validation (2 hours ago)
+```
+
+### The `recent` Command
+
+List recently accessed worktrees sorted by last access time.
+
+```bash
+# Show 5 most recent (default)
+wt recent
+
+# Show 10 most recent
+wt recent 10
+```
+
+Output:
+```text
+📅 Recently Accessed Worktrees
+
+  1. myapp / feature/login         2 hours ago
+  2. myapp / staging               5 hours ago
+  3. otherapp / main               1 day ago
+  4. myapp / feature/dashboard     2 days ago
+  5. myapp / bugfix/cart           5 days ago
+```
+
+**Tip:** Use `wt recent` at the start of your day to quickly see what you were working on.
+
+### The `clean` Command
+
+Free up disk space by removing `node_modules/` and `vendor/` from inactive worktrees.
+
+```bash
+# Clean inactive worktrees (>30 days since last access)
+wt clean myapp
+
+# Force clean without confirmation
+wt clean -f myapp
+```
+
+Output:
+```text
+🧹 Cleaning inactive worktrees: myapp
+
+Scanning for worktrees inactive >30 days...
+
+  feature/old-work (45 days inactive)
+    ├─ node_modules: 312 MB
+    └─ vendor: 89 MB
+    Total: 401 MB
+
+  bugfix/ancient (62 days inactive)
+    ├─ node_modules: 298 MB
+    └─ vendor: 87 MB
+    Total: 385 MB
+
+Total space to free: 786 MB
+
+Clean these directories? [y/N]: y
+
+✔ Cleaned feature/old-work (401 MB freed)
+✔ Cleaned bugfix/ancient (385 MB freed)
+
+✔ Cleaned 2 worktrees, freed 786 MB
+```
+
+**Notes:**
+- Only affects worktrees not accessed in the last 30 days
+- Worktrees remain functional - just run `composer install` / `npm install` when you return to them
+- Use `-f` flag to skip confirmation
+
+---
+
+## Health Score System
+
+Every worktree receives a health score from 0-100, displayed as a letter grade (A-F). This helps you quickly identify worktrees that need attention.
+
+### How Scores are Calculated
+
+The health score starts at 100 and deducts points based on various factors:
+
+| Factor | Max Deduction | Calculation |
+|--------|---------------|-------------|
+| **Commits behind base** | -30 points | -2 points per commit behind `origin/staging` |
+| **Uncommitted changes** | -20 points | -5 points per uncommitted file (max 4) |
+| **Days since last commit** | -25 points | -1 point per day (max 25) |
+| **Merge conflicts** | -10 points | -10 if unmerged/conflicted state |
+| **Untracked files** | -5 points | -1 point per untracked file (max 5) |
+
+### Grade Scale
+
+| Grade | Score Range | Meaning |
+|-------|-------------|---------|
+| **A** | 90-100 | Excellent - worktree is up-to-date and clean |
+| **B** | 80-89 | Good - minor issues, generally healthy |
+| **C** | 70-79 | Fair - needs some attention |
+| **D** | 60-69 | Poor - significant issues to address |
+| **F** | 0-59 | Failing - urgent attention needed |
+
+### Where Health Scores Appear
+
+Health scores are shown in:
+- `wt dashboard` - Per-worktree and per-repository average
+- `wt health <repo>` - Detailed breakdown for all worktrees
+- `wt info <repo> [branch]` - Full score breakdown
+- `wt status <repo>` - Quick grade indicator
+
+### The `health` Command
+
+Get detailed health information for all worktrees in a repository.
+
+```bash
+wt health myapp
+```
+
+Output:
+```text
+🏥 Health Check: myapp
+
+  BRANCH                    GRADE   SCORE   ISSUES
+  ─────────────────────────────────────────────────────────
+  staging                   A       100     -
+  feature/login             B       85      5 behind, 3 uncommitted
+  feature/old-work          D       62      25 days old, 15 behind
+  bugfix/stale              F       45      45 days old, 32 behind, conflicts
+
+Summary:
+  Total worktrees: 4
+  Healthy (A/B):   2
+  Needs attention: 2
+
+Recommendations:
+  • Sync feature/old-work with staging
+  • Resolve merge conflicts in bugfix/stale
+  • Consider removing bugfix/stale if no longer needed
+```
+
+### Improving Health Scores
+
+| Issue | Solution |
+|-------|----------|
+| Commits behind | Run `wt sync <repo> <branch>` to rebase onto staging |
+| Uncommitted changes | Commit or stash your work |
+| Old commits | Make regular commits as you work |
+| Merge conflicts | Resolve conflicts and complete the merge |
+| Untracked files | Add to `.gitignore` or delete if not needed |
+
+---
+
+## Branch Aliases
+
+Create shortcuts for frequently accessed worktrees. Aliases save you from typing long repository and branch names.
+
+### Creating an Alias
+
+```bash
+wt alias set <name> <repo> <branch>
+
+# Examples
+wt alias set login myapp feature/user-authentication
+wt alias set api otherapp feature/api-v2
+wt alias set staging myapp staging
+```
+
+### Using an Alias
+
+Aliases work with navigation commands:
+
+```bash
+# These are equivalent
+wt code login
+wt code myapp feature/user-authentication
+
+# Switch to aliased worktree
+cd "$(wt switch login)"
+
+# Open in browser
+wt open api
+```
+
+### Managing Aliases
+
+```bash
+# List all aliases
+wt alias list
+```
+
+Output:
+```text
+📝 Branch Aliases
+
+  login    → myapp / feature/user-authentication
+  api      → otherapp / feature/api-v2
+  staging  → myapp / staging
+```
+
+```bash
+# Get details for a specific alias
+wt alias get login
+```
+
+Output:
+```text
+  login → myapp / feature/user-authentication
+```
+
+```bash
+# Remove an alias
+wt alias remove login
+```
+
+### Alias Storage
+
+Aliases are stored in `~/.wt/aliases` as simple key-value pairs:
+
+```text
+login=myapp:feature/user-authentication
+api=otherapp:feature/api-v2
+staging=myapp:staging
+```
+
+---
+
+## Multi-Repository Operations
+
+The `--all-repos` flag lets you run operations across all repositories at once.
+
+### Supported Commands
+
+| Command | With `--all-repos` |
+|---------|-------------------|
+| `wt pull-all` | Pull all worktrees in all repos |
+| `wt build-all` | Build all worktrees in all repos |
+| `wt exec-all` | Run command in all repos |
+
+### Examples
+
+```bash
+# Pull all worktrees across all repositories
+wt pull-all --all-repos
+```
+
+Output:
+```text
+→ Pulling all repositories...
+
+myapp (3 worktrees)
+  ✔ staging
+  ✔ feature/login
+  ✔ feature/dashboard
+
+otherapp (2 worktrees)
+  ✔ main
+  ✔ feature/api
+
+✔ Pulled 5 worktrees across 2 repositories
+```
+
+```bash
+# Build all worktrees everywhere
+wt build-all --all-repos
+```
+
+```bash
+# Run a command in all repos
+wt exec-all --all-repos "php artisan cache:clear"
+```
+
+### Parallel Execution
+
+Multi-repo operations run in parallel for efficiency. Configure concurrency:
+
+```bash
+# In ~/.wtrc
+WT_MAX_PARALLEL=8  # Default: 4
+```
+
+---
+
+## Branch Naming Validation
+
+Configure branch naming patterns to enforce team conventions.
+
+### Setting a Pattern
+
+Add to `~/.wtrc`:
+
+```bash
+# Require feature/, bugfix/, or hotfix/ prefix
+BRANCH_PATTERN="^(feature|bugfix|hotfix)/[a-z0-9-]+$"
+```
+
+### Pattern Validation
+
+When you try to create a worktree with a non-conforming branch name:
+
+```bash
+wt add myapp my-branch
+```
+
+Output:
+```text
+✖ Branch name 'my-branch' does not match required pattern
+
+Pattern: ^(feature|bugfix|hotfix)/[a-z0-9-]+$
+
+Suggestions:
+  • feature/my-branch
+  • bugfix/my-branch
+  • hotfix/my-branch
+
+Use -f to bypass this check.
+```
+
+### Bypassing Validation
+
+Use `-f` when you need to create a branch that doesn't match the pattern:
+
+```bash
+wt add -f myapp special-case-branch
+```
+
+---
+
+## Self-Update
+
+Keep wt up-to-date with the built-in upgrade command.
+
+### Checking for Updates
+
+```bash
+wt version --check
+```
+
+Output:
+```text
+wt version 4.0.0
+
+Checking for updates...
+
+✔ You are running the latest version (4.0.0)
+```
+
+Or if an update is available:
+```text
+wt version 4.0.0
+
+Checking for updates...
+
+⚠ Update available: 4.1.0 (you have 4.0.0)
+
+Run 'wt upgrade' to update.
+
+Release notes: https://github.com/dannyharding10/wt-worktree-manager/releases/tag/v4.1.0
+```
+
+### Upgrading
+
+```bash
+wt upgrade
+```
+
+Output:
+```text
+→ Checking for updates...
+
+⚠ Update available: 4.1.0 (current: 4.0.0)
+
+Changes in 4.1.0:
+  • Added new command: wt diff-all
+  • Fixed issue with database names on Windows
+  • Improved error messages
+
+Upgrade now? [Y/n]: y
+
+→ Downloading v4.1.0...
+→ Verifying checksum...
+→ Installing...
+→ Rebuilding from source...
+
+✔ Upgraded to v4.1.0
+
+Restart your terminal for changes to take effect.
+```
+
+### Manual Update
+
+If you cloned the repository, you can also update manually:
+
+```bash
+cd ~/Projects/wt-worktree-manager
+git pull
+./build.sh
+```
 
 ---
 

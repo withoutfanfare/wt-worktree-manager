@@ -82,3 +82,69 @@ validate_name() {
     die "Invalid $type name: '$input' (malformed path)"
   fi
 }
+
+# Validate branch name against configured pattern
+# Usage: validate_branch_pattern <branch_name>
+# Uses BRANCH_PATTERN from config (optional)
+validate_branch_pattern() {
+  local branch="$1"
+
+  # Skip if no pattern configured
+  [[ -z "${BRANCH_PATTERN:-}" ]] && return 0
+
+  # Check against pattern
+  if [[ ! "$branch" =~ $BRANCH_PATTERN ]]; then
+    local suggestion=""
+
+    # Try to suggest a fix
+    local clean_branch="${branch//[^a-z0-9\/\-]/-}"  # Replace invalid chars
+    clean_branch="${clean_branch:l}"  # Lowercase
+    clean_branch="${clean_branch//--/-}"  # Remove double dashes
+
+    # Try common prefixes
+    if [[ ! "$branch" =~ ^(feature|bugfix|hotfix|release)/ ]]; then
+      suggestion="feature/${clean_branch##*/}"
+    else
+      suggestion="$clean_branch"
+    fi
+
+    local error_msg="Branch name '${C_RED}$branch${C_RESET}' doesn't match required pattern"
+    error_msg+="\n\n${C_DIM}Pattern:${C_RESET} $BRANCH_PATTERN"
+    error_msg+="\n${C_DIM}Example:${C_RESET} feature/my-feature, bugfix/fix-login"
+
+    if [[ "$suggestion" != "$branch" ]]; then
+      error_msg+="\n\n${C_YELLOW}Suggestion:${C_RESET} $suggestion"
+    fi
+
+    error_msg+="\n\n${C_DIM}Use --force to bypass this check${C_RESET}"
+
+    if [[ "${FORCE:-false}" != true ]]; then
+      die "$error_msg"
+    else
+      warn "Branch name doesn't match pattern (bypassed with --force)"
+    fi
+  fi
+}
+
+# Auto-fix common branch name issues
+# Usage: normalize_branch_name <branch_name>
+normalize_branch_name() {
+  local branch="$1"
+
+  # Replace spaces with dashes
+  branch="${branch// /-}"
+
+  # Lowercase
+  branch="${branch:l}"
+
+  # Remove consecutive dashes
+  while [[ "$branch" == *"--"* ]]; do
+    branch="${branch//--/-}"
+  done
+
+  # Remove leading/trailing dashes from segments
+  branch="${branch#-}"
+  branch="${branch%-}"
+
+  print -r -- "$branch"
+}

@@ -9,6 +9,67 @@ BLUE='\033[0;34m'
 DIM='\033[2m'
 NC='\033[0m'
 
+# Check for supported operating system
+check_os() {
+  local os_name
+  os_name="$(uname -s)"
+
+  case "$os_name" in
+    Darwin)
+      # macOS - supported
+      return 0
+      ;;
+    Linux)
+      echo ""
+      echo -e "${RED}╔═══════════════════════════════════════════════════════════╗${NC}"
+      echo -e "${RED}║  Linux is not yet supported                               ║${NC}"
+      echo -e "${RED}╚═══════════════════════════════════════════════════════════╝${NC}"
+      echo ""
+      echo -e "wt is currently macOS-only due to:"
+      echo -e "  • Laravel Herd integration (macOS/Windows only)"
+      echo -e "  • Homebrew path conventions"
+      echo -e "  • macOS-specific path defaults"
+      echo ""
+      echo -e "${BLUE}Linux support is planned for a future release.${NC}"
+      echo -e "See: ${DIM}https://github.com/dannyharding10/wt-worktree-manager/blob/main/ROADMAP.md${NC}"
+      echo ""
+      echo -e "Want to help? Contributions are welcome!"
+      echo ""
+      exit 1
+      ;;
+    CYGWIN*|MINGW*|MSYS*|Windows_NT)
+      echo ""
+      echo -e "${RED}╔═══════════════════════════════════════════════════════════╗${NC}"
+      echo -e "${RED}║  Windows is not yet supported                             ║${NC}"
+      echo -e "${RED}╚═══════════════════════════════════════════════════════════╝${NC}"
+      echo ""
+      echo -e "wt is currently macOS-only due to:"
+      echo -e "  • zsh shell requirement"
+      echo -e "  • Unix path conventions"
+      echo -e "  • macOS-specific integrations"
+      echo ""
+      echo -e "${BLUE}Windows support (via WSL) is planned for a future release.${NC}"
+      echo -e "See: ${DIM}https://github.com/dannyharding10/wt-worktree-manager/blob/main/ROADMAP.md${NC}"
+      echo ""
+      echo -e "Want to help? Contributions are welcome!"
+      echo ""
+      exit 1
+      ;;
+    *)
+      echo ""
+      echo -e "${RED}Unsupported operating system: $os_name${NC}"
+      echo ""
+      echo -e "wt currently only supports macOS."
+      echo -e "See: ${DIM}https://github.com/dannyharding10/wt-worktree-manager/blob/main/ROADMAP.md${NC}"
+      echo ""
+      exit 1
+      ;;
+  esac
+}
+
+# Run OS check immediately
+check_os
+
 # Get the directory where this script lives (the repo)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -89,57 +150,134 @@ print_header() {
 
 check_requirements() {
   local missing=()
+  local optional_missing=()
 
-  echo -e "${BLUE}Checking requirements...${NC}"
+  echo -e "${BLUE}Checking dependencies...${NC}"
+  echo ""
+  echo -e "  ${DIM}Required:${NC}"
 
-  # Check for zsh
+  # Check for zsh (required)
   if ! command -v zsh &> /dev/null; then
     missing+=("zsh")
+    echo -e "  ${RED}✗${NC} zsh"
   else
     echo -e "  ${GREEN}✓${NC} zsh"
   fi
 
-  # Check for git
+  # Check for git (required)
   if ! command -v git &> /dev/null; then
     missing+=("git")
+    echo -e "  ${RED}✗${NC} git"
   else
     echo -e "  ${GREEN}✓${NC} git"
   fi
 
+  echo ""
+  echo -e "  ${DIM}Optional (for full functionality):${NC}"
+
+  # Check for fzf (optional - interactive mode)
+  if ! command -v fzf &> /dev/null; then
+    optional_missing+=("fzf")
+    echo -e "  ${YELLOW}○${NC} fzf ${DIM}- interactive selection (wt add -i)${NC}"
+  else
+    echo -e "  ${GREEN}✓${NC} fzf"
+  fi
+
+  # Check for jq (optional - JSON formatting)
+  if ! command -v jq &> /dev/null; then
+    optional_missing+=("jq")
+    echo -e "  ${YELLOW}○${NC} jq ${DIM}- pretty JSON output (--pretty flag)${NC}"
+  else
+    echo -e "  ${GREEN}✓${NC} jq"
+  fi
+
+  # Check for mysql (optional - database management)
+  if ! command -v mysql &> /dev/null; then
+    optional_missing+=("mysql")
+    echo -e "  ${YELLOW}○${NC} mysql ${DIM}- database creation/backup${NC}"
+  else
+    echo -e "  ${GREEN}✓${NC} mysql"
+  fi
+
+  echo ""
+  echo -e "  ${DIM}Framework-specific (for hooks):${NC}"
+
   # Check for Laravel Herd
   if ! command -v herd &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} herd ${DIM}(optional - some features will be limited)${NC}"
+    echo -e "  ${YELLOW}○${NC} herd ${DIM}- Laravel Herd HTTPS sites${NC}"
   else
     echo -e "  ${GREEN}✓${NC} herd"
   fi
 
   # Check for composer
   if ! command -v composer &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} composer ${DIM}(optional - needed for Laravel projects)${NC}"
+    echo -e "  ${YELLOW}○${NC} composer ${DIM}- PHP dependency management${NC}"
   else
     echo -e "  ${GREEN}✓${NC} composer"
   fi
 
-  # Check for fzf
-  if ! command -v fzf &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} fzf ${DIM}(optional - enables interactive selection)${NC}"
+  # Check for npm/node
+  if ! command -v npm &> /dev/null; then
+    echo -e "  ${YELLOW}○${NC} npm ${DIM}- Node.js package management${NC}"
   else
-    echo -e "  ${GREEN}✓${NC} fzf"
-  fi
-
-  # Check for mysql
-  if ! command -v mysql &> /dev/null; then
-    echo -e "  ${YELLOW}!${NC} mysql ${DIM}(optional - enables database management)${NC}"
-  else
-    echo -e "  ${GREEN}✓${NC} mysql"
+    echo -e "  ${GREEN}✓${NC} npm"
   fi
 
   echo ""
 
+  # Show installation instructions for missing required dependencies
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo -e "${RED}Missing required dependencies: ${missing[*]}${NC}"
-    echo "Please install them and try again."
+    echo ""
+    echo -e "${BLUE}Installation instructions:${NC}"
+    echo ""
+    for dep in "${missing[@]}"; do
+      case "$dep" in
+        zsh)
+          echo -e "  ${YELLOW}zsh:${NC}"
+          echo -e "    macOS: ${DIM}(pre-installed, check /bin/zsh)${NC}"
+          echo -e "    Linux: ${DIM}sudo apt install zsh${NC}"
+          echo ""
+          ;;
+        git)
+          echo -e "  ${YELLOW}git:${NC}"
+          echo -e "    macOS: ${DIM}xcode-select --install${NC}"
+          echo -e "    Linux: ${DIM}sudo apt install git${NC}"
+          echo ""
+          ;;
+      esac
+    done
     exit 1
+  fi
+
+  # Show installation instructions for missing optional dependencies
+  if [[ ${#optional_missing[@]} -gt 0 ]]; then
+    echo -e "${YELLOW}To enable all features, install optional dependencies:${NC}"
+    echo ""
+
+    # Check if Homebrew is available
+    if command -v brew &> /dev/null; then
+      local brew_deps=()
+      for dep in "${optional_missing[@]}"; do
+        brew_deps+=("$dep")
+      done
+      echo -e "  ${DIM}brew install ${brew_deps[*]}${NC}"
+    else
+      for dep in "${optional_missing[@]}"; do
+        case "$dep" in
+          fzf)
+            echo -e "  ${YELLOW}fzf:${NC} ${DIM}https://github.com/junegunn/fzf#installation${NC}"
+            ;;
+          jq)
+            echo -e "  ${YELLOW}jq:${NC} ${DIM}https://jqlang.github.io/jq/download/${NC}"
+            ;;
+          mysql)
+            echo -e "  ${YELLOW}mysql:${NC} ${DIM}https://dev.mysql.com/downloads/mysql/${NC}"
+            ;;
+        esac
+      done
+    fi
+    echo ""
   fi
 }
 

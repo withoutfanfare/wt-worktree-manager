@@ -180,6 +180,29 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [x] Progress indication in `pull-all` and parallel operations
 - [ ] Estimated time remaining for builds
 
+### 3.5 Dashboard View
+**Why:** At-a-glance overview of all repositories and worktrees
+
+- [ ] `wt dashboard` - TUI dashboard showing all repos and worktrees
+- [ ] Real-time updates for status changes
+- [ ] Keyboard navigation (j/k to move, enter to open)
+- [ ] Colour-coded health indicators per worktree
+- [ ] Quick actions (pull, open, remove) from dashboard
+- [ ] Requires: ncurses or similar TUI library
+
+### 3.6 Health Score
+**Why:** Quick assessment of worktree health at a glance
+
+- [ ] Single A-F grade per worktree combining:
+  - Commits behind base (stale)
+  - Uncommitted changes
+  - Untracked files
+  - Days since last commit
+  - Merge status
+- [ ] `wt health myapp` - Show health scores for all worktrees
+- [ ] Health score in `wt ls` output (optional column)
+- [ ] Configurable thresholds for grade boundaries
+
 ---
 
 ## Phase 4: Advanced Features (Medium Priority)
@@ -206,7 +229,20 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 
 **Included templates:** `laravel.conf`, `node.conf`, `minimal.conf`, `backend.conf`
 
-### 4.2 Dependency Sharing
+### 4.2 Branch Naming Validation
+**Why:** Enforce team conventions and prevent invalid branch names
+
+- [ ] Configurable branch name patterns in `.wtrc`:
+  ```bash
+  BRANCH_PATTERN="^(feature|bugfix|hotfix|release)/[a-z0-9-]+$"
+  ```
+- [ ] Validate on `wt add` with helpful error messages
+- [ ] Suggest corrections for invalid names
+- [ ] Optional: auto-fix common issues (spaces → dashes, uppercase → lowercase)
+- [ ] Per-repo patterns in `.wtconfig`
+- [ ] Bypass with `--force` for edge cases
+
+### 4.3 Dependency Sharing
 **Why:** Save disk space and setup time
 
 - [ ] Shared `vendor/` via symlinks to cached version
@@ -214,7 +250,7 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [ ] `wt share-deps myapp` to enable
 - [ ] Cache invalidation on lockfile changes
 
-### 4.3 Snapshot & Restore
+### 4.4 Snapshot & Restore
 **Why:** Quick state preservation
 
 - [ ] `wt snapshot myapp feature/x` - Save current state
@@ -225,7 +261,7 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
   - Environment file
 - [ ] Automatic snapshots before risky operations
 
-### 4.4 Worktree Archiving
+### 4.5 Worktree Archiving
 **Why:** Preserve but clean up inactive worktrees
 
 - [ ] `wt archive myapp feature/x` - Remove worktree, keep branch + snapshot
@@ -289,7 +325,17 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [x] `parallel_run` framework for adding parallel operations to any command
 - [ ] `wt prune --parallel` - Parallel cleanup
 
-### 6.2 Caching Layer
+### 6.2 Multi-Repository Operations
+**Why:** Manage many repositories at once
+
+- [ ] `wt pull-all --all-repos` - Pull all worktrees across ALL repositories
+- [ ] `wt status --all-repos` - Status overview of all repos
+- [ ] `wt exec-all --all-repos <cmd>` - Execute command everywhere
+- [ ] Repository groups: `wt group add work myapp otherapp`
+- [ ] Group operations: `wt pull-all @work` - Pull all in group
+- [ ] Configurable via `.wtrc`: `REPO_GROUPS="work:myapp,otherapp personal:blog,portfolio"`
+
+### 6.3 Caching Layer
 **Why:** Avoid redundant operations
 
 - [ ] Cache worktree metadata (avoid repeated git commands)
@@ -297,7 +343,7 @@ Run with: `./run-tests.sh` (all), `./run-tests.sh unit`, `./run-tests.sh integra
 - [ ] Dependency cache sharing across worktrees
 - [ ] Cache invalidation triggers
 
-### 6.3 Resilience Improvements ✅ COMPLETE (v4.0.0)
+### 6.4 Resilience Improvements ✅ COMPLETE (v4.0.0)
 **Why:** Graceful handling of edge cases
 
 - [x] **`wt repair [repo]`** - New command to fix common issues:
@@ -377,11 +423,17 @@ These require minimal effort but add value:
 6. ~~**Dry run** - `wt rm --dry-run` to preview actions~~ ✅ **DONE (v3.9.0)** - `wt add --dry-run` previews worktree creation
 7. **`wt info`** - Detailed info about a single worktree
 8. **Configurable URL patterns** - Support custom URL schemes beyond `*.test`
+9. **`wt upgrade`** - Self-update command: pull repo, rebuild, verify installation
 
 **Additional v3.9.0 quick wins implemented:**
 - `--pretty` flag for colourised JSON output
 - "Did you mean?" suggestions for mistyped template names
 - Template listing in `wt --help`
+
+**v4.0.0 installer improvements:**
+- Enhanced dependency checks with installation instructions
+- OS guard blocking Linux/Windows with friendly messages
+- jq/python3 fallback for JSON formatting
 
 ---
 
@@ -400,9 +452,13 @@ These require minimal effort but add value:
 | P2 | 4.1 Templates | Medium | Medium | ✅ DONE |
 | P2 | 5.1 GitHub | Medium | High | |
 | P2 | 6.1 Parallel | Medium | Medium | ✅ DONE |
-| P2 | 6.3 Resilience | Medium | Medium | ✅ DONE |
+| P2 | 6.2 Multi-Repo | Medium | High | |
+| P2 | 6.4 Resilience | Medium | Medium | ✅ DONE |
+| P2 | 3.5 Dashboard | High | Medium | |
 | P3 | 2.2 WSL | Medium | Medium | |
-| P3 | 4.2 Dep Sharing | High | Medium | |
+| P3 | 3.6 Health Score | Low | Low | |
+| P3 | 4.2 Branch Naming | Low | Low | |
+| P3 | 4.3 Dep Sharing | High | Medium | |
 | P3 | 5.2 IDE | High | High | |
 
 ---

@@ -46,7 +46,12 @@ usage() {
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
+  print -r -- "  ${C_GREEN}info${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Detailed worktree information"
+  print -r -- "  ${C_GREEN}recent${C_RESET}   ${C_DIM}[count]${C_RESET}                    List recently accessed worktrees"
+  print -r -- "  ${C_GREEN}clean${C_RESET}    ${C_DIM}[repo]${C_RESET}                     Remove deps from inactive worktrees"
+  print -r -- "  ${C_GREEN}alias${C_RESET}    ${C_DIM}[add|rm] <name> [target]${C_RESET}   Manage branch aliases"
   print -r -- "  ${C_GREEN}repair${C_RESET}   ${C_DIM}[repo]${C_RESET}                     Fix common issues"
+  print -r -- "  ${C_GREEN}upgrade${C_RESET}                             Self-update wt to latest version"
   print -r -- "  ${C_GREEN}report${C_RESET}   ${C_DIM}<repo> [--output <file>]${C_RESET}  Generate markdown status report"
   print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
   print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
@@ -62,7 +67,7 @@ usage() {
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
-  print -r -- "  ${C_YELLOW}-v, --version${C_RESET}        Show version"
+  print -r -- "  ${C_YELLOW}-v, --version${C_RESET}        Show version (add --check to check for updates)"
   print -r -- ""
   print -r -- "${C_BOLD}EXAMPLES${C_RESET}"
   print -r -- "  ${C_DIM}# Set up a new project${C_RESET}"
@@ -159,6 +164,8 @@ parse_flags() {
       --no-backup) NO_BACKUP=true ;;
       --dry-run) DRY_RUN=true ;;
       --pretty) PRETTY_JSON=true ;;
+      --check) VERSION_CHECK=true ;;
+      --all-repos) ALL_REPOS=true ;;
       --template=*)
         WT_TEMPLATE="${1#--template=}"
         if [[ -z "$WT_TEMPLATE" ]]; then
@@ -174,7 +181,15 @@ parse_flags() {
         fi
         WT_TEMPLATE="$1"
         ;;
-      -v|--version) print -r -- "wt version $VERSION"; exit 0 ;;
+      -v|--version)
+        if [[ "${VERSION_CHECK:-false}" == true ]]; then
+          setup_colors
+          cmd_version_check
+        else
+          print -r -- "wt version $VERSION"
+        fi
+        exit 0
+        ;;
       -h|--help|help) setup_colors; usage; exit 0 ;;
       -*) setup_colors; die "Unknown flag: $1" ;;
       *) REMAINING_ARGS+=("$1") ;;
@@ -231,6 +246,12 @@ main() {
     diff)         cmd_diff "$@" ;;
     report)       cmd_report "$@" ;;
     health)       cmd_health "$@" ;;
+    info)         cmd_info "$@" ;;
+    recent)       cmd_recent "$@" ;;
+    clean)        cmd_clean "$@" ;;
+    alias)        cmd_alias "$@" ;;
+    upgrade)      cmd_upgrade "$@" ;;
+    dashboard)    cmd_dashboard "$@" ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: wt --help)" ;;
   esac
