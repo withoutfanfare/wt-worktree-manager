@@ -41,7 +41,29 @@ cmd_pull() {
 
 cmd_pull_all() {
   local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt pull-all <repo>"
+
+  # Multi-repo mode
+  if [[ "${ALL_REPOS:-false}" == true || -z "$repo" ]]; then
+    if [[ "${ALL_REPOS:-false}" == true ]]; then
+      info "Pulling all worktrees across all repositories..."
+      print -r -- ""
+    else
+      [[ -n "$repo" ]] || die "Usage: wt pull-all <repo>
+       Use --all-repos to pull across all repositories."
+    fi
+
+    local total_success=0 total_failed=0
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _pull_all_for_repo "$repo_name" "$git_dir"
+      print -r -- ""
+    done
+
+    ok "Pull complete across all repositories"
+    return 0
+  fi
 
   validate_name "$repo" "repository"
 
@@ -49,8 +71,15 @@ cmd_pull_all() {
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
-  info "Fetching latest..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet
+  _pull_all_for_repo "$repo" "$git_dir"
+}
+
+_pull_all_for_repo() {
+  local repo="$1"
+  local git_dir="$2"
+
+  dim "  Fetching latest..."
+  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
 
   local out
   out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true

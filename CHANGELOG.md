@@ -7,9 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [4.0.0] - 2025-12-25
+## [4.0.0] - 2025-12-27
 
 ### Added
+
+#### New Commands
+- **`wt dashboard`** - Visual overview of all repositories with health grades, worktree counts, and status indicators
+- **`wt info [repo] [branch]`** - Detailed information about a worktree (path, URL, database, health score, sync status)
+- **`wt recent [limit]`** - List recently accessed worktrees sorted by access time (default: 5)
+- **`wt clean [repo]`** - Remove `node_modules/` and `vendor/` from inactive worktrees (>30 days) to save disk space
+- **`wt alias`** - Manage branch aliases for quick access:
+  - `wt alias set <name> <repo> <branch>` - Create an alias
+  - `wt alias get <name>` - Show alias target
+  - `wt alias list` - List all aliases
+  - `wt alias remove <name>` - Delete an alias
+- **`wt upgrade`** - Self-update command that downloads the latest version from GitHub
+- **`wt version --check`** - Check for available updates without installing
+
+#### Health Score System
+- **A-F grades** for worktree health based on:
+  - Commits behind base branch (max -30 points)
+  - Uncommitted changes (max -20 points)
+  - Days since last commit (max -25 points)
+  - Merge status (max -10 points)
+  - Untracked files (max -5 points)
+- Visible in `wt health`, `wt dashboard`, and individual worktree displays
+- Coloured output: A/B (green), C/D (yellow), F (red)
+
+#### Multi-Repository Operations
+- **`--all-repos` flag** - Apply operations across all repositories:
+  - `wt pull-all --all-repos` - Pull all worktrees in all repos
+  - `wt build-all --all-repos` - Build all worktrees in all repos
+  - `wt exec-all --all-repos <cmd>` - Execute command in all repos
+
+#### Branch Naming Validation
+- **Configurable branch patterns** - Set `BRANCH_PATTERN` in config to enforce naming conventions
+- **Auto-suggestions** - When a branch name doesn't match the pattern, helpful suggestions are provided
+- **`--force` bypass** - Use `-f` to bypass pattern validation when needed
 
 #### Code Modularisation
 - **Modular architecture** - The 3,162-line monolithic script has been refactored into 18 focused modules in `lib/` for better maintainability
@@ -66,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - **`wt fresh-all`** - Removed due to destructive nature (runs `migrate:fresh` on all worktrees). Use `wt exec-all <repo> "php artisan migrate:fresh --seed"` if needed.
+
+### Fixed
+- **Zsh local variable re-declaration bug** - Fixed spurious debug output appearing in `wt dashboard`, `wt recent`, and other commands with loops. The issue was caused by zsh printing previous values when `local var; var=value` is re-declared inside a loop. Variables are now declared before loops.
+- **Variable name conflicts** - Fixed `path` variable colliding with zsh's special `$path` array (lowercase PATH). Renamed to `wt_path` throughout.
+- **Recent command folder reference** - Fixed `wt recent` using wrong variable (`${path:t}` instead of `${wt_path:t}`) for folder name extraction.
 
 ### Developer Notes
 - Modules are sourced in dependency order (00 through 99)

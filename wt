@@ -267,6 +267,72 @@ validate_name() {
   fi
 }
 
+# Validate branch name against configured pattern
+# Usage: validate_branch_pattern <branch_name>
+# Uses BRANCH_PATTERN from config (optional)
+validate_branch_pattern() {
+  local branch="$1"
+
+  # Skip if no pattern configured
+  [[ -z "${BRANCH_PATTERN:-}" ]] && return 0
+
+  # Check against pattern
+  if [[ ! "$branch" =~ $BRANCH_PATTERN ]]; then
+    local suggestion=""
+
+    # Try to suggest a fix
+    local clean_branch="${branch//[^a-z0-9\/\-]/-}"  # Replace invalid chars
+    clean_branch="${clean_branch:l}"  # Lowercase
+    clean_branch="${clean_branch//--/-}"  # Remove double dashes
+
+    # Try common prefixes
+    if [[ ! "$branch" =~ ^(feature|bugfix|hotfix|release)/ ]]; then
+      suggestion="feature/${clean_branch##*/}"
+    else
+      suggestion="$clean_branch"
+    fi
+
+    local error_msg="Branch name '${C_RED}$branch${C_RESET}' doesn't match required pattern"
+    error_msg+="\n\n${C_DIM}Pattern:${C_RESET} $BRANCH_PATTERN"
+    error_msg+="\n${C_DIM}Example:${C_RESET} feature/my-feature, bugfix/fix-login"
+
+    if [[ "$suggestion" != "$branch" ]]; then
+      error_msg+="\n\n${C_YELLOW}Suggestion:${C_RESET} $suggestion"
+    fi
+
+    error_msg+="\n\n${C_DIM}Use --force to bypass this check${C_RESET}"
+
+    if [[ "${FORCE:-false}" != true ]]; then
+      die "$error_msg"
+    else
+      warn "Branch name doesn't match pattern (bypassed with --force)"
+    fi
+  fi
+}
+
+# Auto-fix common branch name issues
+# Usage: normalize_branch_name <branch_name>
+normalize_branch_name() {
+  local branch="$1"
+
+  # Replace spaces with dashes
+  branch="${branch// /-}"
+
+  # Lowercase
+  branch="${branch:l}"
+
+  # Remove consecutive dashes
+  while [[ "$branch" == *"--"* ]]; do
+    branch="${branch//--/-}"
+  done
+
+  # Remove leading/trailing dashes from segments
+  branch="${branch#-}"
+  branch="${branch%-}"
+
+  print -r -- "$branch"
+}
+
 # 03-paths.sh - Path resolution, worktree detection, URL generation
 
 sed_inplace() {
@@ -2074,7 +2140,29 @@ cmd_pull() {
 
 cmd_pull_all() {
   local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt pull-all <repo>"
+
+  # Multi-repo mode
+  if [[ "${ALL_REPOS:-false}" == true || -z "$repo" ]]; then
+    if [[ "${ALL_REPOS:-false}" == true ]]; then
+      info "Pulling all worktrees across all repositories..."
+      print -r -- ""
+    else
+      [[ -n "$repo" ]] || die "Usage: wt pull-all <repo>
+       Use --all-repos to pull across all repositories."
+    fi
+
+    local total_success=0 total_failed=0
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _pull_all_for_repo "$repo_name" "$git_dir"
+      print -r -- ""
+    done
+
+    ok "Pull complete across all repositories"
+    return 0
+  fi
 
   validate_name "$repo" "repository"
 
@@ -2082,8 +2170,15 @@ cmd_pull_all() {
   git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
-  info "Fetching latest..."
-  git --git-dir="$git_dir" fetch --all --prune --quiet
+  _pull_all_for_repo "$repo" "$git_dir"
+}
+
+_pull_all_for_repo() {
+  local repo="$1"
+  local git_dir="$2"
+
+  dim "  Fetching latest..."
+  git --git-dir="$git_dir" fetch --all --prune --quiet 2>/dev/null || true
 
   local out
   out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
@@ -2548,12 +2643,12 @@ cmd_ls() {
     local idx="$1" path="$2" branch="$3" head="$4"
     local folder="${path:t}"
     local url
-    if [[ -f "$path/.env" ]]; then
-      url="$(grep -E '^APP_URL=' "$path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
+    if [[ -f "$wt_path/.env" ]]; then
+      url="$(grep -E '^APP_URL=' "$wt_path/.env" 2>/dev/null | head -1 | cut -d'=' -f2- | sed 's/#.*//' | tr -d '"' | tr -d "'" | tr -d ' ')"
     fi
     [[ -z "$url" ]] && url="https://${folder}.test"
-    local sha; sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || true)"
-    local st; st="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+    local sha; sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null || true)"
+    local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null || true)"
     local state_icon="●" state_color="$C_GREEN" state_text="clean"
     local dirty=false
     local mismatch=false
@@ -2569,7 +2664,7 @@ cmd_ls() {
     # Check for branch/directory mismatch
     local match_result="" expected_slug=""
     if [[ -n "$branch" ]]; then
-      match_result="$(check_branch_directory_match "$path" "$branch" "$repo")"
+      match_result="$(check_branch_directory_match "$wt_path" "$branch" "$repo")"
       if [[ "$match_result" == mismatch\|* ]]; then
         mismatch=true
         expected_slug="${match_result#mismatch|}"
@@ -2577,13 +2672,13 @@ cmd_ls() {
     fi
 
     # Get ahead/behind
-    local counts; counts="$(get_ahead_behind "$path" "$DEFAULT_BASE")"
+    local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
     local ahead="${counts%% *}" behind="${counts##* }"
 
     if [[ "$JSON_OUTPUT" == true ]]; then
-      json_items+=("{\"path\": \"$(json_escape "$path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind, \"mismatch\": $mismatch}")
+      json_items+=("{\"path\": \"$(json_escape "$wt_path")\", \"branch\": \"$(json_escape "$branch")\", \"sha\": \"$(json_escape "$sha")\", \"url\": \"$(json_escape "$url")\", \"dirty\": $dirty, \"ahead\": $ahead, \"behind\": $behind, \"mismatch\": $mismatch}")
     else
-      print -r -- "${C_BOLD}[$idx]${C_RESET} ${C_CYAN}$path${C_RESET}"
+      print -r -- "${C_BOLD}[$idx]${C_RESET} ${C_CYAN}$wt_path${C_RESET}"
       if [[ -n "$branch" ]]; then
         print -r -- "    ${C_DIM}branch${C_RESET}  ${C_MAGENTA}$branch${C_RESET}"
       else
@@ -2604,26 +2699,26 @@ cmd_ls() {
     fi
   }
 
-  local path="" branch="" head="" idx=0 line=""
+  local wt_path="" branch="" head="" idx=0 line=""
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
-      if [[ -n "$path" ]]; then
+      if [[ -n "$wt_path" ]]; then
         idx=$((idx + 1))
-        display_worktree "$idx" "$path" "$branch" "$head"
+        display_worktree "$idx" "$wt_path" "$branch" "$head"
       fi
-      path=""; branch=""; head=""
+      wt_path=""; branch=""; head=""
       continue
     fi
 
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == worktree\ * ]] && wt_path="${line#worktree }"
     [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
     [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
   done <<< "$out"
 
   # Handle last entry (no trailing blank line)
-  if [[ -n "$path" ]]; then
+  if [[ -n "$wt_path" ]]; then
     idx=$((idx + 1))
-    display_worktree "$idx" "$path" "$branch" "$head"
+    display_worktree "$idx" "$wt_path" "$branch" "$head"
   fi
 
   if [[ "$JSON_OUTPUT" == true ]]; then
@@ -2662,7 +2757,7 @@ cmd_status() {
     print -r -- "  ${C_DIM}$(printf '%.0s─' {1..83})${C_RESET}"
   fi
 
-  local path="" branch="" head="" line=""
+  local wt_path="" branch="" head="" line=""
   local sha st state_icon state_color changes counts ahead behind
   local age age_days merged_icon sync_display is_stale is_inactive
   local mismatches=()
@@ -2743,23 +2838,23 @@ cmd_status() {
   while IFS= read -r line; do
     if [[ -z "$line" ]]; then
       # Skip bare repo entry (no branch) and process worktrees
-      if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-        display_status_row "$path" "$branch"
+      if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != "$git_dir" ]]; then
+        display_status_row "$wt_path" "$branch"
       fi
-      path=""
+      wt_path=""
       branch=""
       head=""
       continue
     fi
 
-    [[ "$line" == worktree\ * ]] && path="${line#worktree }"
+    [[ "$line" == worktree\ * ]] && wt_path="${line#worktree }"
     [[ "$line" == branch\ refs/heads/* ]] && branch="${line#branch refs/heads/}"
     [[ "$line" == HEAD\ * ]] && head="${line#HEAD }"
   done <<< "$out"
 
   # Handle last entry
-  if [[ -n "$path" && -n "$branch" && "$path" != "$git_dir" ]]; then
-    display_status_row "$path" "$branch"
+  if [[ -n "$wt_path" && -n "$branch" && "$wt_path" != "$git_dir" ]]; then
+    display_status_row "$wt_path" "$branch"
   fi
 
   # JSON output
@@ -2843,26 +2938,26 @@ cmd_report() {
   report+="## Summary\n\n"
 
   local total=0 clean=0 dirty=0
-  local path="" branch="" head=""
+  local wt_path="" branch="" head=""
 
   # First pass - count stats
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == worktree\ * ]]; then
-      path="${line#worktree }"
+      wt_path="${line#worktree }"
     elif [[ "$line" == "branch refs/heads/"* ]]; then
       branch="${line#branch refs/heads/}"
     elif [[ "$line" == HEAD\ * ]]; then
       head="${line#HEAD }"
-    elif [[ -z "$line" && -n "$path" ]]; then
-      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
+    elif [[ -z "$line" && -n "$wt_path" ]]; then
+      [[ "$wt_path" == *.git ]] && { wt_path=""; branch=""; head=""; continue; }
       total=$((total + 1))
-      local status; status="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+      local status; status="$(git -C "$wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
       if (( status > 0 )); then
         dirty=$((dirty + 1))
       else
         clean=$((clean + 1))
       fi
-      path=""; branch=""; head=""
+      wt_path=""; branch=""; head=""
     fi
   done <<< "$out"
 
@@ -2877,34 +2972,34 @@ cmd_report() {
   report+="|--------|--------|-------|--------|-------------|\n"
 
   # Second pass - generate table
-  path=""; branch=""; head=""
+  wt_path=""; branch=""; head=""
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == worktree\ * ]]; then
-      path="${line#worktree }"
+      wt_path="${line#worktree }"
     elif [[ "$line" == "branch refs/heads/"* ]]; then
       branch="${line#branch refs/heads/}"
     elif [[ "$line" == HEAD\ * ]]; then
       head="${line#HEAD }"
-    elif [[ -z "$line" && -n "$path" ]]; then
-      [[ "$path" == *.git ]] && { path=""; branch=""; head=""; continue; }
+    elif [[ -z "$line" && -n "$wt_path" ]]; then
+      [[ "$wt_path" == *.git ]] && { wt_path=""; branch=""; head=""; continue; }
 
-      local status_count; status_count="$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+      local status_count; status_count="$(git -C "$wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
       local status_icon="clean"
       (( status_count > 0 )) && status_icon="$status_count changes"
 
       local ahead=0 behind=0
-      local upstream; upstream="$(git -C "$path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=""
+      local upstream; upstream="$(git -C "$wt_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)" || upstream=""
       if [[ -n "$upstream" ]]; then
-        ahead="$(git -C "$path" rev-list --count '@{upstream}'..HEAD 2>/dev/null)" || ahead=0
-        behind="$(git -C "$path" rev-list --count HEAD..'@{upstream}' 2>/dev/null)" || behind=0
+        ahead="$(git -C "$wt_path" rev-list --count '@{upstream}'..HEAD 2>/dev/null)" || ahead=0
+        behind="$(git -C "$wt_path" rev-list --count HEAD..'@{upstream}' 2>/dev/null)" || behind=0
       fi
 
-      local last_commit; last_commit="$(git -C "$path" log -1 --format='%s' 2>/dev/null | cut -c1-40)" || last_commit=""
+      local last_commit; last_commit="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null | cut -c1-40)" || last_commit=""
       [[ ${#last_commit} -ge 40 ]] && last_commit="${last_commit}..."
 
       report+="| \`$branch\` | $status_icon | $ahead | $behind | $last_commit |\n"
 
-      path=""; branch=""; head=""
+      wt_path=""; branch=""; head=""
     fi
   done <<< "$out"
 
@@ -2930,6 +3025,106 @@ cmd_report() {
   fi
 }
 
+# Calculate health score for a worktree (A-F grade)
+# Returns: grade|score|details
+calculate_health_score() {
+  local wt_path="$1"
+  local score=100
+  local issues=()
+
+  # Check commits behind (max -30 points)
+  local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
+  local behind="${counts##* }"
+  if (( behind > 50 )); then
+    score=$((score - 30))
+    issues+=("behind:$behind")
+  elif (( behind > 20 )); then
+    score=$((score - 20))
+    issues+=("behind:$behind")
+  elif (( behind > 5 )); then
+    score=$((score - 10))
+    issues+=("behind:$behind")
+  fi
+
+  # Check uncommitted changes (max -20 points)
+  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"
+  if [[ -n "$st" ]]; then
+    local changes; changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
+    if (( changes > 20 )); then
+      score=$((score - 20))
+      issues+=("changes:$changes")
+    elif (( changes > 5 )); then
+      score=$((score - 10))
+      issues+=("changes:$changes")
+    else
+      score=$((score - 5))
+      issues+=("changes:$changes")
+    fi
+  fi
+
+  # Check days since last commit (max -25 points)
+  local age_days; age_days="$(get_commit_age_days "$wt_path")"
+  if (( age_days > 60 )); then
+    score=$((score - 25))
+    issues+=("age:${age_days}d")
+  elif (( age_days > 30 )); then
+    score=$((score - 15))
+    issues+=("age:${age_days}d")
+  elif (( age_days > 14 )); then
+    score=$((score - 5))
+    issues+=("age:${age_days}d")
+  fi
+
+  # Check merge status (max -10 points)
+  if ! is_branch_merged "$wt_path" "$DEFAULT_BASE"; then
+    score=$((score - 10))
+    issues+=("unmerged")
+  fi
+
+  # Check untracked files (max -5 points)
+  local untracked=0
+  if [[ -n "$st" ]]; then
+    untracked="$(print -r -- "$st" | grep -c '^??' 2>/dev/null)" || untracked=0
+  fi
+  if (( untracked > 10 )); then
+    score=$((score - 5))
+    issues+=("untracked:$untracked")
+  fi
+
+  # Ensure score is between 0-100
+  (( score < 0 )) && score=0
+  (( score > 100 )) && score=100
+
+  # Calculate grade
+  local grade
+  if (( score >= 90 )); then
+    grade="A"
+  elif (( score >= 80 )); then
+    grade="B"
+  elif (( score >= 70 )); then
+    grade="C"
+  elif (( score >= 60 )); then
+    grade="D"
+  else
+    grade="F"
+  fi
+
+  print -r -- "$grade|$score|${(j:,:)issues}"
+}
+
+# Format health grade with colour
+format_grade() {
+  local grade="$1"
+  case "$grade" in
+    A) print -r -- "${C_GREEN}$grade${C_RESET}" ;;
+    B) print -r -- "${C_GREEN}$grade${C_RESET}" ;;
+    C) print -r -- "${C_YELLOW}$grade${C_RESET}" ;;
+    D) print -r -- "${C_YELLOW}$grade${C_RESET}" ;;
+    F) print -r -- "${C_RED}$grade${C_RESET}" ;;
+    *) print -r -- "$grade" ;;
+  esac
+}
+
 cmd_health() {
   local repo="${1:-}"
   [[ -n "$repo" ]] || die "Usage: wt health <repo>"
@@ -2942,17 +3137,70 @@ cmd_health() {
   print -r -- "${C_BOLD}Health Check: ${C_CYAN}$repo${C_RESET}"
   print -r -- ""
 
+  # Show health scores for all worktrees
+  print -r -- "${C_BOLD}Worktree Health Scores${C_RESET}"
+  print -r -- ""
+  printf "  ${C_DIM}%-5s %-30s %-6s %s${C_RESET}\n" "GRADE" "BRANCH" "SCORE" "ISSUES"
+  print -r -- "  ${C_DIM}$(printf '%.0s─' {1..70})${C_RESET}"
+
+  local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || out=""
+  local wt_path="" branch=""
+  local total_score=0 wt_count=0
+
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      wt_path="${line#worktree }"
+    elif [[ "$line" == branch\ refs/heads/* ]]; then
+      branch="${line#branch refs/heads/}"
+    elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git && -n "$branch" ]]; then
+      if [[ -d "$wt_path" ]]; then
+        local result; result="$(calculate_health_score "$wt_path")"
+        local grade="${result%%|*}"
+        local rest="${result#*|}"
+        local score="${rest%%|*}"
+        local issues="${rest#*|}"
+
+        total_score=$((total_score + score))
+        wt_count=$((wt_count + 1))
+
+        local grade_colored; grade_colored="$(format_grade "$grade")"
+        local branch_display="${branch:0:28}"
+        local issues_display="${issues//,/ }"
+
+        printf "  %-5s %-30s %-6s ${C_DIM}%s${C_RESET}\n" \
+          "$grade_colored" "$branch_display" "$score" "$issues_display"
+      fi
+      wt_path=""
+      branch=""
+    fi
+  done <<< "$out"
+
+  if (( wt_count > 0 )); then
+    local avg_score=$((total_score / wt_count))
+    local avg_grade
+    if (( avg_score >= 90 )); then avg_grade="A"
+    elif (( avg_score >= 80 )); then avg_grade="B"
+    elif (( avg_score >= 70 )); then avg_grade="C"
+    elif (( avg_score >= 60 )); then avg_grade="D"
+    else avg_grade="F"
+    fi
+
+    print -r -- ""
+    print -r -- "  ${C_BOLD}Average:${C_RESET} $(format_grade "$avg_grade") (${avg_score}/100)"
+  fi
+  print -r -- ""
+
   local issues=0 warnings=0
 
   # Check for stale worktrees
   print -r -- "${C_BOLD}Stale Worktrees${C_RESET}"
   local stale; stale="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null | grep -A1 '^worktree ' | grep -v '^worktree ' | grep -v '^--$' | while read -r path; do
-    [[ -n "$path" && ! -d "$path" ]] && echo "$path"
+    [[ -n "$wt_path" && ! -d "$wt_path" ]] && echo "$wt_path"
   done)"
   if [[ -n "$stale" ]]; then
     warn "Found stale worktree references:"
     print -r -- "$stale" | while read -r path; do
-      print -r -- "  ${C_RED}x${C_RESET} $path"
+      print -r -- "  ${C_RED}x${C_RESET} $wt_path"
     done
     issues=$((issues + 1))
     dim "  Fix: wt prune $repo"
@@ -3009,9 +3257,9 @@ cmd_health() {
   local missing_env=0
   while IFS= read -r line; do
     if [[ "$line" == worktree\ * ]]; then
-      local path="${line#worktree }"
-      [[ "$path" == *.git ]] && continue
-      if [[ -f "$path/.env.example" && ! -f "$path/.env" ]]; then
+      local wt_path="${line#worktree }"
+      [[ "$wt_path" == *.git ]] && continue
+      if [[ -f "$wt_path/.env.example" && ! -f "$wt_path/.env" ]]; then
         [[ $missing_env -eq 0 ]] && warn "Worktrees missing .env file:"
         print -r -- "  ${C_YELLOW}!${C_RESET} ${path##*/}"
         missing_env=$((missing_env + 1))
@@ -3046,6 +3294,164 @@ cmd_health() {
     [[ $issues -gt 0 ]] && warn "$issues issue(s) need attention"
     [[ $warnings -gt 0 ]] && dim "  $warnings warning(s) to review"
   fi
+  print -r -- ""
+}
+
+# Dashboard - Overview of all repositories and worktrees
+cmd_dashboard() {
+  print -r -- ""
+  print -r -- "${C_BOLD}╔════════════════════════════════════════════════════════════════════╗${C_RESET}"
+  print -r -- "${C_BOLD}║                    wt Dashboard                                    ║${C_RESET}"
+  print -r -- "${C_BOLD}╚════════════════════════════════════════════════════════════════════╝${C_RESET}"
+  print -r -- ""
+
+  local total_repos=0
+  local total_worktrees=0
+  local total_dirty=0
+  local total_stale=0
+
+  # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
+  local repo_name out wt_path branch line
+  local repo_wt_count repo_dirty repo_stale repo_grade_sum
+  local result grade rest score st age_days
+  local avg_grade avg_score grade_colored
+  local wt wt_branch wt_rest wt_grade wt_score wt_grade_colored
+  local status_parts shown
+
+  # Collect data for all repos
+  for git_dir in "$HERD_ROOT"/*.git(N); do
+    [[ -d "$git_dir" ]] || continue
+    repo_name="${${git_dir:t}%.git}"
+    total_repos=$((total_repos + 1))
+
+    out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
+    wt_path=""
+    branch=""
+    repo_wt_count=0
+    repo_dirty=0
+    repo_stale=0
+    repo_grade_sum=0
+
+    # Collect worktree info for this repo
+    local wt_info=()
+
+    while IFS= read -r line; do
+      if [[ "$line" == worktree\ * ]]; then
+        wt_path="${line#worktree }"
+      elif [[ "$line" == branch\ refs/heads/* ]]; then
+        branch="${line#branch refs/heads/}"
+      elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
+        # Process this worktree entry
+        repo_wt_count=$((repo_wt_count + 1))
+        total_worktrees=$((total_worktrees + 1))
+
+        # Get health score
+        result="$(calculate_health_score "$wt_path")"
+        grade="${result%%|*}"
+        rest="${result#*|}"
+        score="${rest%%|*}"
+        repo_grade_sum=$((repo_grade_sum + score))
+
+        # Check dirty
+        st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+        if [[ -n "$st" ]]; then
+          repo_dirty=$((repo_dirty + 1))
+          total_dirty=$((total_dirty + 1))
+        fi
+
+        # Check stale
+        age_days="$(get_commit_age_days "$wt_path")"
+        if (( age_days > 30 )); then
+          repo_stale=$((repo_stale + 1))
+          total_stale=$((total_stale + 1))
+        fi
+
+        wt_info+=("$branch|$grade|$score")
+        wt_path=""
+        branch=""
+      fi
+    done <<< "$out"
+    # Handle last entry (no trailing newline in porcelain output)
+    if [[ -n "$wt_path" && "$wt_path" != *.git && -n "$branch" && -d "$wt_path" ]]; then
+      repo_wt_count=$((repo_wt_count + 1))
+      total_worktrees=$((total_worktrees + 1))
+      result="$(calculate_health_score "$wt_path")"
+      grade="${result%%|*}"
+      rest="${result#*|}"
+      score="${rest%%|*}"
+      repo_grade_sum=$((repo_grade_sum + score))
+      st="$(git -C "$wt_path" status --porcelain 2>/dev/null)" || st=""
+      [[ -n "$st" ]] && { repo_dirty=$((repo_dirty + 1)); total_dirty=$((total_dirty + 1)); }
+      age_days="$(get_commit_age_days "$wt_path")"
+      (( age_days > 30 )) && { repo_stale=$((repo_stale + 1)); total_stale=$((total_stale + 1)); }
+      wt_info+=("$branch|$grade|$score")
+    fi
+
+    # Calculate average grade for repo
+    avg_grade="?"
+    if (( repo_wt_count > 0 )); then
+      avg_score=$((repo_grade_sum / repo_wt_count))
+      if (( avg_score >= 90 )); then avg_grade="A"
+      elif (( avg_score >= 80 )); then avg_grade="B"
+      elif (( avg_score >= 70 )); then avg_grade="C"
+      elif (( avg_score >= 60 )); then avg_grade="D"
+      else avg_grade="F"
+      fi
+    fi
+
+    # Print repo summary
+    grade_colored="$(format_grade "$avg_grade")"
+    print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET} ${C_DIM}($repo_wt_count worktrees)${C_RESET} $grade_colored"
+
+    # Show status indicators
+    status_parts=()
+    if (( repo_dirty > 0 )); then
+      status_parts+=("${C_YELLOW}$repo_dirty dirty${C_RESET}")
+    fi
+    if (( repo_stale > 0 )); then
+      status_parts+=("${C_RED}$repo_stale stale${C_RESET}")
+    fi
+    if (( ${#status_parts[@]} > 0 )); then
+      print -r -- "  ${(j: | :)status_parts}"
+    fi
+
+    # Show worktrees (limit to 5)
+    shown=0
+    for wt in "${wt_info[@]}"; do
+      (( shown >= 5 )) && break
+      wt_branch="${wt%%|*}"
+      wt_rest="${wt#*|}"
+      wt_grade="${wt_rest%%|*}"
+      wt_score="${wt_rest#*|}"
+      wt_grade_colored="$(format_grade "$wt_grade")"
+      print -r -- "  ${C_DIM}├─${C_RESET} ${C_MAGENTA}${wt_branch:0:35}${C_RESET} $wt_grade_colored"
+      shown=$((shown + 1))
+    done
+
+    if (( ${#wt_info[@]} > 5 )); then
+      print -r -- "  ${C_DIM}└─ ... and $((${#wt_info[@]} - 5)) more${C_RESET}"
+    elif (( ${#wt_info[@]} > 0 )); then
+      # Change last ├─ to └─ for visual consistency
+      :
+    fi
+    print -r -- ""
+  done
+
+  # Print summary
+  print -r -- "${C_DIM}────────────────────────────────────────────────────────────────────${C_RESET}"
+  print -r -- ""
+  print -r -- "${C_BOLD}Summary${C_RESET}"
+  print -r -- "  Repositories:  ${C_GREEN}$total_repos${C_RESET}"
+  print -r -- "  Worktrees:     ${C_GREEN}$total_worktrees${C_RESET}"
+  if (( total_dirty > 0 )); then
+    print -r -- "  With changes:  ${C_YELLOW}$total_dirty${C_RESET}"
+  fi
+  if (( total_stale > 0 )); then
+    print -r -- "  Stale (>30d):  ${C_RED}$total_stale${C_RESET}"
+  fi
+  print -r -- ""
+
+  dim "Commands: wt status <repo> | wt health <repo> | wt recent"
   print -r -- ""
 }
 
@@ -3483,16 +3889,16 @@ _repair_repo() {
   # 3. Check for missing .git files in worktrees
   info "Checking worktree integrity..."
   local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || true
-  local path=""
+  local wt_wt_path=""
   while IFS= read -r line; do
     if [[ "$line" == worktree\ * ]]; then
-      path="${line#worktree }"
-    elif [[ -z "$line" && -n "$path" && "$path" != *.git ]]; then
-      if [[ -d "$path" && ! -f "$path/.git" ]]; then
+      wt_path="${line#worktree }"
+    elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git ]]; then
+      if [[ -d "$wt_path" && ! -f "$wt_path/.git" ]]; then
         warn "  Missing .git file: ${path##*/}"
         dim "    May need to recreate worktree"
       fi
-      path=""
+      wt_path=""
     fi
   done <<< "$out"
 
@@ -3508,18 +3914,46 @@ _repair_repo() {
 
 cmd_build_all() {
   local repo="${1:-}"
-  [[ -n "$repo" ]] || die "Usage: wt build-all <repo>"
+
+  # Multi-repo mode
+  if [[ "${ALL_REPOS:-false}" == true ]]; then
+    info "Building all worktrees across all repositories..."
+    print -r -- ""
+
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _build_all_for_repo "$repo_name" "$git_dir"
+      print -r -- ""
+    done
+
+    ok "Build complete across all repositories"
+    notify "wt build-all" "Completed across all repos"
+    return 0
+  fi
+
+  [[ -n "$repo" ]] || die "Usage: wt build-all <repo>
+       Use --all-repos to build across all repositories."
 
   validate_name "$repo" "repository"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
+  _build_all_for_repo "$repo" "$git_dir"
+  notify "wt build-all" "Completed for $repo"
+}
+
+_build_all_for_repo() {
+  local repo="$1"
+  local git_dir="$2"
+
   # Collect worktrees
   local worktrees=()
   collect_worktrees "$git_dir" worktrees
 
-  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+  (( ${#worktrees[@]} > 0 )) || { dim "  No worktrees found."; return 0; }
 
   # Build operations list
   local operations=()
@@ -3531,31 +3965,65 @@ cmd_build_all() {
     fi
   done
 
-  parallel_run report_results "${operations[@]}"
-  notify "wt build-all" "Completed for $repo"
+  if (( ${#operations[@]} > 0 )); then
+    parallel_run report_results "${operations[@]}"
+  else
+    dim "  No worktrees with package.json"
+  fi
 }
 
 cmd_exec_all() {
   local repo="${1:-}"
+
+  # Multi-repo mode
+  if [[ "${ALL_REPOS:-false}" == true ]]; then
+    shift || true
+    local cmd=("$@")
+    (( ${#cmd[@]} > 0 )) || die "Usage: wt exec-all --all-repos <command...>"
+
+    local cmd_str="${cmd[*]}"
+    info "Executing '$cmd_str' across all repositories..."
+    print -r -- ""
+
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      local repo_name="${${git_dir:t}%.git}"
+      print -r -- "${C_BOLD}${C_CYAN}$repo_name${C_RESET}"
+      _exec_all_for_repo "$repo_name" "$git_dir" "$cmd_str"
+      print -r -- ""
+    done
+
+    ok "Execution complete across all repositories"
+    return 0
+  fi
+
   shift || true
   local cmd=("$@")
 
-  [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || die "Usage: wt exec-all <repo> <command...>"
+  [[ -n "$repo" && ${#cmd[@]} -gt 0 ]] || die "Usage: wt exec-all <repo> <command...>
+       Use --all-repos to execute across all repositories."
 
   validate_name "$repo" "repository"
 
   local git_dir; git_dir="$(git_dir_for "$repo")"
   ensure_bare_repo "$git_dir"
 
+  _exec_all_for_repo "$repo" "$git_dir" "${cmd[*]}"
+}
+
+_exec_all_for_repo() {
+  local repo="$1"
+  local git_dir="$2"
+  local cmd_str="$3"
+
   # Collect worktrees
   local worktrees=()
   collect_worktrees "$git_dir" worktrees
 
-  (( ${#worktrees[@]} > 0 )) || { dim "No worktrees found."; return 0; }
+  (( ${#worktrees[@]} > 0 )) || { dim "  No worktrees found."; return 0; }
 
   # Build operations list
   local operations=()
-  local cmd_str="${cmd[*]}"
   for wt_entry in "${worktrees[@]}"; do
     local wt_path="${wt_entry%%|*}"
     local wt_branch="${wt_entry##*|}"
@@ -3563,6 +4031,541 @@ cmd_exec_all() {
   done
 
   parallel_run report_results "${operations[@]}"
+}
+
+# ============================================================================
+# New commands: upgrade, info, recent, clean, alias
+# ============================================================================
+
+cmd_upgrade() {
+  print -r -- ""
+  print -r -- "${C_BOLD}wt upgrade${C_RESET}"
+  print -r -- ""
+
+  # Find the wt script location
+  local wt_path; wt_path="$(command -v wt 2>/dev/null)"
+  if [[ -z "$wt_path" ]]; then
+    die "Cannot find wt in PATH"
+  fi
+
+  # Resolve symlink to find repo
+  local real_path; real_path="$(readlink "$wt_path" 2>/dev/null || echo "$wt_path")"
+  local repo_dir="${real_path:h}"
+
+  # Check if it's a git repo
+  if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
+    # Try parent directory
+    repo_dir="${repo_dir:h}"
+    if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
+      die "wt is not installed from a git repository. Cannot upgrade."
+    fi
+  fi
+
+  info "Repository: ${C_CYAN}$repo_dir${C_RESET}"
+
+  # Check current version
+  local current_version="$VERSION"
+  info "Current version: ${C_YELLOW}v$current_version${C_RESET}"
+
+  # Fetch latest
+  info "Fetching updates..."
+  if ! git -C "$repo_dir" fetch origin --quiet 2>/dev/null; then
+    die "Failed to fetch updates. Check your network connection."
+  fi
+
+  # Check if we're behind
+  local local_head; local_head="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)"
+  local remote_head; remote_head="$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || git -C "$repo_dir" rev-parse origin/master 2>/dev/null)"
+
+  if [[ "$local_head" == "$remote_head" ]]; then
+    ok "Already up to date!"
+    print -r -- ""
+    return 0
+  fi
+
+  # Show what's new
+  local commits_behind; commits_behind="$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || git -C "$repo_dir" rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
+  info "Updates available: ${C_GREEN}$commits_behind${C_RESET} new commit(s)"
+  print -r -- ""
+
+  # Show recent commits
+  dim "Recent changes:"
+  git -C "$repo_dir" log --oneline HEAD..origin/main 2>/dev/null | head -5 | while read -r line; do
+    print -r -- "  ${C_DIM}•${C_RESET} $line"
+  done
+  print -r -- ""
+
+  # Confirm upgrade
+  if [[ "$FORCE" != true ]]; then
+    print -n "${C_YELLOW}Upgrade now? [y/N]${C_RESET} "
+    local response
+    read -r response
+    [[ "$response" =~ ^[Yy]$ ]] || { dim "Aborted"; return 0; }
+  fi
+
+  # Pull updates
+  info "Pulling updates..."
+  if ! git -C "$repo_dir" pull --rebase origin main 2>/dev/null && ! git -C "$repo_dir" pull --rebase origin master 2>/dev/null; then
+    die "Failed to pull updates. You may need to resolve conflicts manually."
+  fi
+
+  # Rebuild if build.sh exists
+  if [[ -x "$repo_dir/build.sh" ]]; then
+    info "Rebuilding..."
+    if ! "$repo_dir/build.sh" >/dev/null 2>&1; then
+      warn "Build failed. Try running ./build.sh manually."
+    fi
+  fi
+
+  # Show new version
+  local new_version
+  if [[ -f "$repo_dir/lib/00-header.sh" ]]; then
+    new_version="$(grep '^VERSION=' "$repo_dir/lib/00-header.sh" 2>/dev/null | cut -d'"' -f2)"
+  elif [[ -f "$repo_dir/wt" ]]; then
+    new_version="$(grep '^VERSION=' "$repo_dir/wt" 2>/dev/null | head -1 | cut -d'"' -f2)"
+  fi
+  new_version="${new_version:-unknown}"
+
+  print -r -- ""
+  ok "Upgraded: ${C_YELLOW}v$current_version${C_RESET} → ${C_GREEN}v$new_version${C_RESET}"
+  print -r -- ""
+
+  # Verify
+  dim "Verify with: wt --version"
+  print -r -- ""
+}
+
+cmd_version_check() {
+  print -r -- ""
+  print -r -- "${C_BOLD}Checking for updates...${C_RESET}"
+  print -r -- ""
+
+  local current_version="$VERSION"
+  info "Installed: ${C_YELLOW}v$current_version${C_RESET}"
+
+  # Find repo directory
+  local wt_path; wt_path="$(command -v wt 2>/dev/null)"
+  local real_path; real_path="$(readlink "$wt_path" 2>/dev/null || echo "$wt_path")"
+  local repo_dir="${real_path:h}"
+
+  if [[ ! -d "$repo_dir/.git" && ! -f "$repo_dir/.git" ]]; then
+    repo_dir="${repo_dir:h}"
+  fi
+
+  if [[ -d "$repo_dir/.git" || -f "$repo_dir/.git" ]]; then
+    # Fetch and check
+    git -C "$repo_dir" fetch origin --quiet 2>/dev/null || true
+
+    local local_head; local_head="$(git -C "$repo_dir" rev-parse HEAD 2>/dev/null)"
+    local remote_head; remote_head="$(git -C "$repo_dir" rev-parse origin/main 2>/dev/null || git -C "$repo_dir" rev-parse origin/master 2>/dev/null)"
+
+    if [[ "$local_head" == "$remote_head" ]]; then
+      ok "You're running the latest version!"
+    else
+      local commits_behind; commits_behind="$(git -C "$repo_dir" rev-list --count HEAD..origin/main 2>/dev/null || git -C "$repo_dir" rev-list --count HEAD..origin/master 2>/dev/null || echo "?")"
+      warn "Update available: ${C_GREEN}$commits_behind${C_RESET} new commit(s)"
+      dim "  Run: wt upgrade"
+    fi
+  else
+    dim "Cannot check for updates (not installed from git)"
+  fi
+
+  print -r -- ""
+}
+
+cmd_info() {
+  local repo="${1:-}"
+  local branch="${2:-}"
+
+  # Auto-detect from current directory
+  if [[ -z "$repo" ]] && detect_current_worktree; then
+    repo="$DETECTED_REPO"
+    branch="$DETECTED_BRANCH"
+    dim "  Detected: $repo / $branch"
+  fi
+
+  [[ -n "$repo" ]] || die "Usage: wt info <repo> [branch]"
+  validate_name "$repo" "repository"
+
+  local git_dir; git_dir="$(git_dir_for "$repo")"
+  ensure_bare_repo "$git_dir"
+
+  # If no branch specified, use fzf or error
+  if [[ -z "$branch" ]]; then
+    if command -v fzf >/dev/null 2>&1; then
+      branch="$(select_worktree "$git_dir")" || return 1
+    else
+      die "Branch required. Usage: wt info <repo> <branch>"
+    fi
+  fi
+
+  validate_name "$branch" "branch"
+
+  local wt_path; wt_path="$(wt_path_for "$repo" "$branch")"
+
+  if [[ ! -d "$wt_path" ]]; then
+    die "Worktree not found: $wt_path"
+  fi
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Worktree Info: ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
+  print -r -- ""
+
+  # Basic info
+  print -r -- "${C_BOLD}Location${C_RESET}"
+  print -r -- "  Path:     ${C_CYAN}$wt_path${C_RESET}"
+  local url; url="$(url_for "$repo" "$branch")"
+  print -r -- "  URL:      ${C_BLUE}$url${C_RESET}"
+  local db_name; db_name="$(db_name_for "$repo" "$branch")"
+  print -r -- "  Database: ${C_YELLOW}$db_name${C_RESET}"
+  print -r -- ""
+
+  # Git info
+  print -r -- "${C_BOLD}Git${C_RESET}"
+  local sha; sha="$(git -C "$wt_path" rev-parse HEAD 2>/dev/null)"
+  local short_sha; short_sha="$(git -C "$wt_path" rev-parse --short HEAD 2>/dev/null)"
+  print -r -- "  Commit:   ${C_DIM}$short_sha${C_RESET}"
+
+  local last_msg; last_msg="$(git -C "$wt_path" log -1 --format='%s' 2>/dev/null | cut -c1-60)"
+  print -r -- "  Message:  ${C_DIM}$last_msg${C_RESET}"
+
+  local last_date; last_date="$(git -C "$wt_path" log -1 --format='%ar' 2>/dev/null)"
+  print -r -- "  Date:     ${C_DIM}$last_date${C_RESET}"
+
+  local author; author="$(git -C "$wt_path" log -1 --format='%an' 2>/dev/null)"
+  print -r -- "  Author:   ${C_DIM}$author${C_RESET}"
+
+  # Sync status
+  local counts; counts="$(get_ahead_behind "$wt_path" "$DEFAULT_BASE")"
+  local ahead="${counts%% *}" behind="${counts##* }"
+  print -r -- "  Sync:     ${C_GREEN}↑$ahead${C_RESET} ${C_RED}↓$behind${C_RESET} vs $DEFAULT_BASE"
+  print -r -- ""
+
+  # Working tree status
+  print -r -- "${C_BOLD}Status${C_RESET}"
+  local st; st="$(git -C "$wt_path" status --porcelain 2>/dev/null)"
+  if [[ -n "$st" ]]; then
+    local changes; changes="$(print -r -- "$st" | wc -l | tr -d ' ')"
+    local staged; staged="$(print -r -- "$st" | grep -c '^[MADRC]' || echo 0)"
+    local unstaged; unstaged="$(print -r -- "$st" | grep -c '^.[MADRC]' || echo 0)"
+    local untracked; untracked="$(print -r -- "$st" | grep -c '^??' || echo 0)"
+    print -r -- "  Changes:  ${C_YELLOW}$changes${C_RESET} total"
+    print -r -- "  Staged:   ${C_GREEN}$staged${C_RESET}"
+    print -r -- "  Modified: ${C_YELLOW}$unstaged${C_RESET}"
+    print -r -- "  Untracked: ${C_DIM}$untracked${C_RESET}"
+  else
+    print -r -- "  Status:   ${C_GREEN}● Clean${C_RESET}"
+  fi
+  print -r -- ""
+
+  # Disk usage
+  print -r -- "${C_BOLD}Disk Usage${C_RESET}"
+  local total_size; total_size="$(du -sh "$wt_path" 2>/dev/null | cut -f1)"
+  print -r -- "  Total:        ${C_YELLOW}$total_size${C_RESET}"
+
+  if [[ -d "$wt_path/node_modules" ]]; then
+    local nm_size; nm_size="$(du -sh "$wt_path/node_modules" 2>/dev/null | cut -f1)"
+    print -r -- "  node_modules: ${C_DIM}$nm_size${C_RESET}"
+  fi
+  if [[ -d "$wt_path/vendor" ]]; then
+    local vendor_size; vendor_size="$(du -sh "$wt_path/vendor" 2>/dev/null | cut -f1)"
+    print -r -- "  vendor:       ${C_DIM}$vendor_size${C_RESET}"
+  fi
+  print -r -- ""
+
+  # Framework detection
+  print -r -- "${C_BOLD}Framework${C_RESET}"
+  if [[ -f "$wt_path/artisan" ]]; then
+    local laravel_version; laravel_version="$(grep -m1 'laravel/framework' "$wt_path/composer.lock" 2>/dev/null | grep -o '"version": "[^"]*"' | cut -d'"' -f4)"
+    print -r -- "  Laravel:  ${C_GREEN}$laravel_version${C_RESET}"
+  fi
+  if [[ -f "$wt_path/package.json" ]]; then
+    local node_deps; node_deps="$(jq '.dependencies | length' "$wt_path/package.json" 2>/dev/null || echo "?")"
+    print -r -- "  Node:     ${C_DIM}$node_deps dependencies${C_RESET}"
+  fi
+  print -r -- ""
+}
+
+cmd_recent() {
+  local limit="${1:-5}"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Recently Accessed Worktrees${C_RESET}"
+  print -r -- ""
+
+  # Find all worktrees and sort by access time
+  local worktrees=()
+
+  # Declare loop-scoped variables BEFORE the loop to avoid zsh local re-declaration bug
+  local repo_name out wt_path line atime
+  local entry rest repo folder branch now age age_str
+
+  for git_dir in "$HERD_ROOT"/*.git(N); do
+    [[ -d "$git_dir" ]] || continue
+    repo_name="${${git_dir:t}%.git}"
+
+    out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || continue
+    wt_path=""
+
+    while IFS= read -r line; do
+      if [[ "$line" == worktree\ * ]]; then
+        wt_path="${line#worktree }"
+      elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]]; then
+        atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+        worktrees+=("$atime|$repo_name|$wt_path")
+        wt_path=""
+      fi
+    done <<< "$out"
+    # Handle last entry (no trailing newline in porcelain output)
+    if [[ -n "$wt_path" && "$wt_path" != *.git && -d "$wt_path" ]]; then
+      atime="$(stat -f '%m' "$wt_path" 2>/dev/null || stat -c '%Y' "$wt_path" 2>/dev/null || echo 0)"
+      worktrees+=("$atime|$repo_name|$wt_path")
+    fi
+  done
+
+  if (( ${#worktrees[@]} == 0 )); then
+    dim "No worktrees found."
+    return 0
+  fi
+
+  # Sort by access time (newest first) and show top N
+  local sorted
+  sorted=($(printf '%s\n' "${worktrees[@]}" | sort -t'|' -k1 -rn | head -n "$limit"))
+
+  local idx=0
+  for entry in "${sorted[@]}"; do
+    idx=$((idx + 1))
+    atime="${entry%%|*}"
+    rest="${entry#*|}"
+    repo="${rest%%|*}"
+    wt_path="${rest#*|}"
+    folder="${wt_path:t}"
+    branch="${folder#*--}"
+
+    # Format time
+    now="$(date +%s)"
+    age=$((now - atime))
+    if (( age < 3600 )); then
+      age_str="$((age / 60))m ago"
+    elif (( age < 86400 )); then
+      age_str="$((age / 3600))h ago"
+    else
+      age_str="$((age / 86400))d ago"
+    fi
+
+    print -r -- "  ${C_BOLD}[$idx]${C_RESET} ${C_CYAN}$repo${C_RESET} / ${C_MAGENTA}$branch${C_RESET}"
+    print -r -- "      ${C_DIM}$age_str${C_RESET}"
+  done
+
+  print -r -- ""
+  dim "Usage: cd \"\$(wt cd <repo> <branch>)\""
+  print -r -- ""
+}
+
+cmd_clean() {
+  local repo="${1:-}"
+  local dry_run="${DRY_RUN:-false}"
+
+  print -r -- ""
+  print -r -- "${C_BOLD}Clean Inactive Worktrees${C_RESET}"
+  print -r -- ""
+
+  local inactive_days=30
+  local total_saved=0
+  local cleaned=0
+
+  # Helper to format bytes
+  format_size() {
+    local bytes="$1"
+    if (( bytes >= 1073741824 )); then
+      printf "%.1fG" "$((bytes / 1073741824.0))"
+    elif (( bytes >= 1048576 )); then
+      printf "%.1fM" "$((bytes / 1048576.0))"
+    elif (( bytes >= 1024 )); then
+      printf "%.1fK" "$((bytes / 1024.0))"
+    else
+      printf "%dB" "$bytes"
+    fi
+  }
+
+  process_repo() {
+    local repo_name="$1"
+    local git_dir; git_dir="$(git_dir_for "$repo_name")"
+
+    local out; out="$(git --git-dir="$git_dir" worktree list --porcelain 2>/dev/null)" || return
+    local wt_path="" branch="" line=""
+    local age_days nm_size vendor_size wt_saved folder nm_human v_human
+
+    while IFS= read -r line; do
+      if [[ "$line" == worktree\ * ]]; then
+        wt_path="${line#worktree }"
+      elif [[ "$line" == branch\ refs/heads/* ]]; then
+        branch="${line#branch refs/heads/}"
+      elif [[ -z "$line" && -n "$wt_path" && "$wt_path" != *.git ]]; then
+        if [[ -d "$wt_path" ]]; then
+          age_days="$(get_commit_age_days "$wt_path")"
+
+          if (( age_days > inactive_days )); then
+            nm_size=0
+            vendor_size=0
+            wt_saved=0
+
+            # Check node_modules
+            if [[ -d "$wt_path/node_modules" ]]; then
+              nm_size="$(du -sk "$wt_path/node_modules" 2>/dev/null | cut -f1)"
+              nm_size=$((nm_size * 1024))  # Convert to bytes
+            fi
+
+            # Check vendor
+            if [[ -d "$wt_path/vendor" ]]; then
+              vendor_size="$(du -sk "$wt_path/vendor" 2>/dev/null | cut -f1)"
+              vendor_size=$((vendor_size * 1024))
+            fi
+
+            wt_saved=$((nm_size + vendor_size))
+
+            if (( wt_saved > 0 )); then
+              folder="${wt_path:t}"
+              print -r -- "  ${C_CYAN}$repo_name${C_RESET} / ${C_MAGENTA}${folder#*--}${C_RESET}"
+              print -r -- "    ${C_DIM}Inactive: ${age_days}d${C_RESET}"
+
+              if (( nm_size > 0 )); then
+                nm_human="$(format_size $nm_size)"
+                print -r -- "    ${C_DIM}node_modules:${C_RESET} ${C_YELLOW}$nm_human${C_RESET}"
+              fi
+              if (( vendor_size > 0 )); then
+                v_human="$(format_size $vendor_size)"
+                print -r -- "    ${C_DIM}vendor:${C_RESET}       ${C_YELLOW}$v_human${C_RESET}"
+              fi
+
+              if [[ "$dry_run" != true ]]; then
+                [[ -d "$wt_path/node_modules" ]] && rm -rf "$wt_path/node_modules"
+                [[ -d "$wt_path/vendor" ]] && rm -rf "$wt_path/vendor"
+              fi
+
+              total_saved=$((total_saved + wt_saved))
+              cleaned=$((cleaned + 1))
+              print -r -- ""
+            fi
+          fi
+        fi
+        wt_path=""
+        branch=""
+      fi
+    done <<< "$out"
+  }
+
+  # Declare loop-scoped variables
+  local repo_name total_human
+
+  if [[ -n "$repo" ]]; then
+    validate_name "$repo" "repository"
+    process_repo "$repo"
+  else
+    # Process all repos
+    for git_dir in "$HERD_ROOT"/*.git(N); do
+      [[ -d "$git_dir" ]] || continue
+      repo_name="${${git_dir:t}%.git}"
+      process_repo "$repo_name"
+    done
+  fi
+
+  if (( cleaned == 0 )); then
+    ok "No inactive worktrees with cleanable dependencies found"
+  else
+    total_human="$(format_size $total_saved)"
+    if [[ "$dry_run" == true ]]; then
+      info "Would clean ${C_BOLD}$cleaned${C_RESET} worktree(s), saving ${C_GREEN}$total_human${C_RESET}"
+      dim "  Run without --dry-run to clean"
+    else
+      ok "Cleaned ${C_BOLD}$cleaned${C_RESET} worktree(s), saved ${C_GREEN}$total_human${C_RESET}"
+      dim "  Reinstall with: npm ci / composer install"
+    fi
+  fi
+  print -r -- ""
+}
+
+# Alias management
+readonly WT_ALIASES_FILE="$HOME/.wt/aliases"
+
+cmd_alias() {
+  local action="${1:-}"
+  local alias_name="${2:-}"
+  local target="${3:-}"
+
+  # Ensure aliases file exists
+  [[ -d "${WT_ALIASES_FILE:h}" ]] || mkdir -p "${WT_ALIASES_FILE:h}"
+  [[ -f "$WT_ALIASES_FILE" ]] || touch "$WT_ALIASES_FILE"
+
+  case "$action" in
+    ""|list)
+      print -r -- ""
+      print -r -- "${C_BOLD}Branch Aliases${C_RESET}"
+      print -r -- ""
+      if [[ -s "$WT_ALIASES_FILE" ]]; then
+        while IFS='=' read -r name value; do
+          [[ -n "$name" && "$name" != \#* ]] && print -r -- "  ${C_GREEN}$name${C_RESET} → ${C_MAGENTA}$value${C_RESET}"
+        done < "$WT_ALIASES_FILE"
+      else
+        dim "  No aliases defined"
+      fi
+      print -r -- ""
+      dim "Usage: wt alias add <name> <repo/branch>"
+      dim "       wt alias rm <name>"
+      print -r -- ""
+      ;;
+
+    add|set)
+      [[ -n "$alias_name" && -n "$target" ]] || die "Usage: wt alias add <name> <repo/branch>"
+
+      # Validate alias name (alphanumeric, dash, underscore only)
+      if [[ ! "$alias_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        die "Invalid alias name: '$alias_name' (use alphanumeric, dash, underscore)"
+      fi
+
+      # Remove existing alias if present
+      if grep -q "^${alias_name}=" "$WT_ALIASES_FILE" 2>/dev/null; then
+        local temp_file; temp_file="$(mktemp)"
+        grep -v "^${alias_name}=" "$WT_ALIASES_FILE" > "$temp_file"
+        mv "$temp_file" "$WT_ALIASES_FILE"
+      fi
+
+      # Add new alias
+      print -r -- "${alias_name}=${target}" >> "$WT_ALIASES_FILE"
+      ok "Alias created: ${C_GREEN}$alias_name${C_RESET} → ${C_MAGENTA}$target${C_RESET}"
+      ;;
+
+    rm|remove|delete)
+      [[ -n "$alias_name" ]] || die "Usage: wt alias rm <name>"
+
+      if grep -q "^${alias_name}=" "$WT_ALIASES_FILE" 2>/dev/null; then
+        local temp_file; temp_file="$(mktemp)"
+        grep -v "^${alias_name}=" "$WT_ALIASES_FILE" > "$temp_file"
+        mv "$temp_file" "$WT_ALIASES_FILE"
+        ok "Alias removed: ${C_YELLOW}$alias_name${C_RESET}"
+      else
+        die "Alias not found: $alias_name"
+      fi
+      ;;
+
+    *)
+      die "Unknown action: $action (try: list, add, rm)"
+      ;;
+  esac
+}
+
+# Resolve alias to repo/branch
+resolve_alias() {
+  local alias_name="$1"
+
+  if [[ -f "$WT_ALIASES_FILE" ]]; then
+    local result; result="$(grep "^${alias_name}=" "$WT_ALIASES_FILE" 2>/dev/null | head -1 | cut -d'=' -f2-)"
+    if [[ -n "$result" ]]; then
+      print -r -- "$result"
+      return 0
+    fi
+  fi
+  return 1
 }
 
 # laravel.sh - Laravel-specific commands
@@ -3674,7 +4677,12 @@ usage() {
   print -r -- "${C_BOLD}UTILITIES${C_RESET}"
   print -r -- "  ${C_GREEN}doctor${C_RESET}                              Check system requirements"
   print -r -- "  ${C_GREEN}health${C_RESET}   ${C_DIM}<repo>${C_RESET}                     Check repository health"
+  print -r -- "  ${C_GREEN}info${C_RESET}     ${C_DIM}[repo] [branch]${C_RESET}            Detailed worktree information"
+  print -r -- "  ${C_GREEN}recent${C_RESET}   ${C_DIM}[count]${C_RESET}                    List recently accessed worktrees"
+  print -r -- "  ${C_GREEN}clean${C_RESET}    ${C_DIM}[repo]${C_RESET}                     Remove deps from inactive worktrees"
+  print -r -- "  ${C_GREEN}alias${C_RESET}    ${C_DIM}[add|rm] <name> [target]${C_RESET}   Manage branch aliases"
   print -r -- "  ${C_GREEN}repair${C_RESET}   ${C_DIM}[repo]${C_RESET}                     Fix common issues"
+  print -r -- "  ${C_GREEN}upgrade${C_RESET}                             Self-update wt to latest version"
   print -r -- "  ${C_GREEN}report${C_RESET}   ${C_DIM}<repo> [--output <file>]${C_RESET}  Generate markdown status report"
   print -r -- "  ${C_GREEN}cleanup-herd${C_RESET}                        Remove orphaned Herd nginx configs"
   print -r -- "  ${C_GREEN}unlock${C_RESET}   ${C_DIM}[repo]${C_RESET}                    Remove stale git lock files"
@@ -3690,7 +4698,7 @@ usage() {
   print -r -- "  ${C_YELLOW}--delete-branch${C_RESET}      Delete branch when removing worktree"
   print -r -- "  ${C_YELLOW}--drop-db${C_RESET}            Drop database when removing worktree"
   print -r -- "  ${C_YELLOW}--no-backup${C_RESET}          Skip database backup when removing worktree"
-  print -r -- "  ${C_YELLOW}-v, --version${C_RESET}        Show version"
+  print -r -- "  ${C_YELLOW}-v, --version${C_RESET}        Show version (add --check to check for updates)"
   print -r -- ""
   print -r -- "${C_BOLD}EXAMPLES${C_RESET}"
   print -r -- "  ${C_DIM}# Set up a new project${C_RESET}"
@@ -3787,6 +4795,8 @@ parse_flags() {
       --no-backup) NO_BACKUP=true ;;
       --dry-run) DRY_RUN=true ;;
       --pretty) PRETTY_JSON=true ;;
+      --check) VERSION_CHECK=true ;;
+      --all-repos) ALL_REPOS=true ;;
       --template=*)
         WT_TEMPLATE="${1#--template=}"
         if [[ -z "$WT_TEMPLATE" ]]; then
@@ -3802,7 +4812,15 @@ parse_flags() {
         fi
         WT_TEMPLATE="$1"
         ;;
-      -v|--version) print -r -- "wt version $VERSION"; exit 0 ;;
+      -v|--version)
+        if [[ "${VERSION_CHECK:-false}" == true ]]; then
+          setup_colors
+          cmd_version_check
+        else
+          print -r -- "wt version $VERSION"
+        fi
+        exit 0
+        ;;
       -h|--help|help) setup_colors; usage; exit 0 ;;
       -*) setup_colors; die "Unknown flag: $1" ;;
       *) REMAINING_ARGS+=("$1") ;;
@@ -3859,6 +4877,12 @@ main() {
     diff)         cmd_diff "$@" ;;
     report)       cmd_report "$@" ;;
     health)       cmd_health "$@" ;;
+    info)         cmd_info "$@" ;;
+    recent)       cmd_recent "$@" ;;
+    clean)        cmd_clean "$@" ;;
+    alias)        cmd_alias "$@" ;;
+    upgrade)      cmd_upgrade "$@" ;;
+    dashboard)    cmd_dashboard "$@" ;;
     "")           usage ;;
     *)            die "Unknown command: $cmd (try: wt --help)" ;;
   esac
